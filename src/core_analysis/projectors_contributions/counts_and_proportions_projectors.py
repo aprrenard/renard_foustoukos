@@ -13,6 +13,7 @@ import src.utils.utils_imaging as imaging_utils
 import src.utils.utils_io as io
 from src.utils.utils_plot import *
 
+
 # #############################################################################
 # Contribution of projection neurons to LMI and classifier weights.
 # Simplified version: analyze LMI and weights independently (no merge).

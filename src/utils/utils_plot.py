@@ -12,19 +12,23 @@ sns.set_theme(
     rc={
         'pdf.fonttype': 42,
         'ps.fonttype': 42,
-        'svg.fonttype': 'none',
+        'svg.fonttype': 'none',  # Ensures text is editable in SVGs
         'axes.linewidth': 0.8,
         'xtick.major.width': 0.8,
         'ytick.major.width': 0.8,
         'xtick.major.size': 3,
         'ytick.major.size': 3,
         # Font sizes
-        'axes.labelsize': 10,      # X and Y axis label font size
-        'xtick.labelsize': 10,      # X tick label font size
-        'ytick.labelsize': 10,      # Y tick label font size
-        'axes.titlesize': 10,      # Title font size
-        'legend.fontsize': 10,      # Legend font size
-        'font.size': 10,           # Base font size
+        'axes.labelsize': 6,
+        'xtick.labelsize': 6,
+        'ytick.labelsize': 6,
+        'axes.titlesize': 6,
+        'legend.fontsize': 6,
+        'font.size': 6,
+        'figure.titlesize': 6,
+        'figure.labelsize': 6,
+        'savefig.facecolor': 'white',
+        'axes.unicode_minus': False,  # Ensure minus signs are not used for tick marks
     }
 )
 

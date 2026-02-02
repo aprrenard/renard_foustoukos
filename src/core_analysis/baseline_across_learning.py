@@ -231,217 +231,7 @@ with PdfPages(os.path.join(output_dir, pdf_file)) as pdf:
 
 
 
-
-# #############################################################################
-# Quantify the average response amplitude on baseline trials across days.
-# #############################################################################
-
-sampling_rate = 30
-win_sec = (0, 0.300)
-baseline_win = (0, 1)
-baseline_win = (int(baseline_win[0] * sampling_rate), int(baseline_win[1] * sampling_rate))
-days = [-2, -1, 0, +1, +2]
-days_str = ['-2', '-1', '0', '+1', '+2']
-_, _, mice, db = io.select_sessions_from_db(io.db_path,
-                                            io.nwb_dir,
-                                            two_p_imaging='yes',
-                                            experimenters=['AR', 'GF', 'MI'])
-
-# Load the data.
-# --------------
-
-avg_resp = []
-
-for mouse_id in mice:
-    # Disregard these mice as the number of trials is too low.
-    # if mouse_id in ['GF307', 'GF310', 'GF333', 'AR144', 'AR135']:
-    #     continue
-    reward_group = io.get_mouse_reward_group_from_db(io.db_path, mouse_id)
-
-    file_name = 'tensor_xarray_mapping_data.nc'
-    folder = os.path.join(io.processed_dir, 'mice')
-    xarr = utils_imaging.load_mouse_xarray(mouse_id, folder, file_name)
-    xarr = utils_imaging.substract_baseline(xarr, 2, baseline_win)
-    
-    # Keep days of interest.
-    xarr = xarr.sel(trial=xarr['day'].isin(days))
-    # Average of time points.
-    xarr = xarr.sel(time=slice(win_sec[0], win_sec[1])).mean(dim='time')
-    # Average trials per days.
-    xarr = xarr.groupby('day').mean(dim='trial')
-    # Convert to dataframe.
-    xarr.name = 'average_response'
-    xarr = xarr.to_dataframe().reset_index()
-    xarr['mouse_id'] = mouse_id
-    xarr['reward_group'] = reward_group
-    avg_resp.append(xarr)
-avg_resp = pd.concat(avg_resp)
-# Convert to percent dF/F0.
-avg_resp['average_response'] = avg_resp['average_response'] * 100
-
-
-# Grand average response.
-# -----------------------
-
-
-# Separate average response data for all cells (ignoring cell_type) and for projection types (wS2, wM1)
-variance = "mice"
-if variance == "mice":
-    min_cells = 3
-    avg_resp_filtered = utils_imaging.filter_data_by_cell_count(avg_resp, min_cells)
-    # All cells: ignore cell_type
-    data_avg_allcells = avg_resp_filtered.groupby(['mouse_id', 'day', 'reward_group'])['average_response'].mean().reset_index()
-    # Projection types: only wS2 and wM1
-    data_avg_ctype = avg_resp_filtered[avg_resp_filtered['cell_type'].isin(['wS2', 'wM1'])]
-    data_avg_ctype = data_avg_ctype.groupby(['mouse_id', 'day', 'reward_group', 'cell_type'])['average_response'].mean().reset_index()
-else:
-    # All cells: ignore cell_type
-    data_avg_allcells = avg_resp.groupby(['mouse_id', 'day', 'reward_group', 'roi'])['average_response'].mean().reset_index()
-    data_avg_allcells = data_avg_allcells.groupby(['mouse_id', 'day', 'reward_group'])['average_response'].mean().reset_index()
-    # Projection types: only wS2 and wM1
-    data_avg_ctype = avg_resp[avg_resp['cell_type'].isin(['wS2', 'wM1'])]
-    data_avg_ctype = data_avg_ctype.groupby(['mouse_id', 'day', 'reward_group', 'cell_type', 'roi'])['average_response'].mean().reset_index()
-    data_avg_ctype = data_avg_ctype.groupby(['mouse_id', 'day', 'reward_group', 'cell_type'])['average_response'].mean().reset_index()
-
-# Plot average response across days for all cells (ignoring cell_type)
-fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-sns.pointplot(data=data_avg_allcells, x='day', y='average_response', hue='reward_group',
-                palette=reward_palette, hue_order=['R-', 'R+'], ax=ax, estimator='mean', legend=False)
-ax.set_title('All Cells')
-ax.set_ylabel('Average response (dF/F0)')
-ax.set_ylim(0, 8)
-ax.set_xlabel('Days')
-sns.despine()
-
-# Save figure for all cells.
-output_dir = fr'/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/psth'
-output_dir = io.adjust_path_to_host(output_dir)
-svg_file = f'amplitude_response_across_days_all_cells_{variance}.svg'
-plt.savefig(os.path.join(output_dir, svg_file), format='svg', dpi=300)
-
-# Plot average response across days for projections (wS2, wM1)
-fig, axes = plt.subplots(2, 1, figsize=(6, 8), sharex=True, sharey=True)
-for i, cell_type in enumerate(['wS2', 'wM1']):
-    sns.pointplot(data=data_avg_ctype[data_avg_ctype.cell_type == cell_type], x='day', y='average_response', hue='reward_group',
-                palette=reward_palette, hue_order=['R-', 'R+'], ax=axes[i], estimator='mean', legend=False)
-    axes[i].set_title(f'{cell_type} Cells')
-    axes[i].set_ylabel('Average response (dF/F0)')
-    axes[i].set_ylim(0, 10)
-axes[1].set_xlabel('Days')
-sns.despine()
-
-# Save figure for projections.
-svg_file = f'amplitude_response_across_days_projections_{variance}.svg'
-plt.savefig(os.path.join(output_dir, svg_file), format='svg', dpi=300)
-
-# Stats.
-# Compare R+ and R- groups each day for all cells and projection neurons.
-results = []
-for day in days:
-    # All cells
-    data_stats = data_avg_allcells.loc[data_avg_allcells['day'] == day]
-    r_plus = data_stats[data_stats.reward_group == 'R+']['average_response']
-    r_minus = data_stats[data_stats.reward_group == 'R-']['average_response']
-
-    stat, p_value = mannwhitneyu(r_plus, r_minus, alternative='two-sided')
-    results.append({
-        'day': day,
-        'cell_type': 'all',
-        'stat': stat,
-        'p_value': p_value
-    })
-    # Projection neurons (wS2 and wM1)
-    for cell_type in ['wS2', 'wM1']:
-        data_stats_proj = data_avg_ctype[(data_avg_ctype['cell_type'] == cell_type) & (data_avg_ctype['day'] == day)]
-        r_plus_proj = data_stats_proj[data_stats_proj.reward_group == 'R+']['average_response']
-        r_minus_proj = data_stats_proj[data_stats_proj.reward_group == 'R-']['average_response']
-
-        stat_proj, p_value_proj = mannwhitneyu(r_plus_proj, r_minus_proj, alternative='two-sided')
-        results.append({
-            'day': day,
-            'cell_type': cell_type,
-            'stat': stat_proj,
-            'p_value': p_value_proj
-        })
-stats = pd.DataFrame(results)
-stats['p_value'] = stats['p_value'].apply(lambda x: f'{x:.3}')
-print(stats)
-
-# Save data.
-data_avg_allcells.to_csv(os.path.join(output_dir, f'amplitude_response_across_days_across_{variance}_allcells.csv'), index=False)
-data_avg_ctype.to_csv(os.path.join(output_dir, f'amplitude_response_across_days_across_{variance}_ctype.csv'), index=False)
-# Save stats.
-stats.to_csv(os.path.join(output_dir, f'amplitude_response_across_days_across_{variance}_stats.csv'), index=False)
-
-
-# Same plot comparing projection types inside each reward group across cells.
-# --------------------------------------------------------------------------
-
-# Separate average response data for all cells (ignoring cell_type) and for projection types (wS2, wM1)
-if variance == "mice":
-    min_cells = 3
-    avg_resp_filtered = utils_imaging.filter_data_by_cell_count(avg_resp, min_cells)
-    # All cells: ignore cell_type
-    data_avg_allcells = avg_resp_filtered.groupby(['mouse_id', 'day', 'reward_group'])['average_response'].mean().reset_index()
-    # Projection types: only wS2 and wM1
-    data_avg_ctype = avg_resp_filtered[avg_resp_filtered['cell_type'].isin(['wS2', 'wM1'])]
-    data_avg_ctype = data_avg_ctype.groupby(['mouse_id', 'day', 'reward_group', 'cell_type'])['average_response'].mean().reset_index()
-else:
-    # All cells: ignore cell_type
-    data_avg_allcells = avg_resp.groupby(['mouse_id', 'day', 'reward_group', 'roi'])['average_response'].mean().reset_index()
-    data_avg_allcells = data_avg_allcells.groupby(['mouse_id', 'day', 'reward_group'])['average_response'].mean().reset_index()
-    # Projection types: only wS2 and wM1
-    data_avg_ctype = avg_resp[avg_resp['cell_type'].isin(['wS2', 'wM1'])]
-    data_avg_ctype = data_avg_ctype.groupby(['mouse_id', 'day', 'reward_group', 'cell_type', 'roi'])['average_response'].mean().reset_index()
-    data_avg_ctype = data_avg_ctype.groupby(['mouse_id', 'day', 'reward_group', 'cell_type'])['average_response'].mean().reset_index()
-
-# Plot average response across days comparing projection types within each reward group
-fig, axes = plt.subplots(2, 1, figsize=(6, 8), sharex=True, sharey=True)
-# R+ group
-sns.pointplot(data=data_avg_ctype[data_avg_ctype.reward_group == 'R+'], x='day', y='average_response', hue='cell_type',
-              palette=s2_m1_palette, hue_order=['wM1', 'wS2'], ax=axes[0], estimator='mean', legend=False)
-axes[0].set_title('R+ Group')
-axes[0].set_ylabel('Average response (dF/F0)')
-axes[0].set_ylim(0, 10)
-# R- group
-sns.pointplot(data=data_avg_ctype[data_avg_ctype.reward_group == 'R-'], x='day', y='average_response', hue='cell_type',
-              palette=s2_m1_palette, hue_order=['wM1', 'wS2'], ax=axes[1], estimator='mean', legend=False)
-axes[1].set_title('R- Group')
-axes[1].set_ylabel('Average response (dF/F0)')
-axes[1].set_xlabel('Days')
-sns.despine()
-
-# Stats: Compare wS2 and wM1 within each reward group and day
-results = []
-for reward_group in ['R+', 'R-']:
-    for day in days:
-        data_stats = data_avg_ctype.loc[(data_avg_ctype['day'] == day) & (data_avg_ctype['reward_group'] == reward_group)]
-        wS2 = data_stats[data_stats.cell_type == 'wS2']['average_response']
-        wM1 = data_stats[data_stats.cell_type == 'wM1']['average_response']
-        stat, p_value = mannwhitneyu(wS2, wM1, alternative='two-sided')
-        results.append({
-            'reward_group': reward_group,
-            'day': day,
-            'stat': stat,
-            'p_value': p_value
-        })
-stats_projection = pd.DataFrame(results)
-stats_projection['p_value'] = stats_projection['p_value'].apply(lambda x: f'{x:.3}')
-print(stats_projection)
-
-# Save figure
-output_dir = fr'/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/psth'
-output_dir = io.adjust_path_to_host(output_dir)
-svg_file = f'average_response_projection_comparison_across_{variance}.svg'
-plt.savefig(os.path.join(output_dir, svg_file), format='svg', dpi=300)
-# Save stats
-stats_projection.to_csv(os.path.join(output_dir, f'average_response_projection_comparison_across_{variance}_stats.csv'), index=False)
-# Save data
-data_avg_ctype.to_csv(os.path.join(output_dir, f'average_response_projection_comparison_across_{variance}_ctype.csv'), index=False)
-data_avg_allcells.to_csv(os.path.join(output_dir, f'average_response_projection_comparison_across_{variance}_allcells.csv'), index=False)
-
-
-
+# ####################################################################
 # Quantifying response before and after learning inside reward groups.
 # ####################################################################
 
@@ -563,12 +353,14 @@ axes[1, 0].axvline(0, color='orange', linestyle='-')
 # Top-right: Response amplitude for rewarded mice
 rewarded_avg = data_plot_avg_all[data_plot_avg_all['reward_group'] == 'R+']
 sns.barplot(data=rewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='#1b9e77', ax=axes[0, 1])
+sns.swarmplot(data=rewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='black', alpha=0.5, size=4, ax=axes[0, 1])
 axes[0, 1].set_title('Response Amplitude (Rewarded Mice)')
 axes[0, 1].set_ylabel('Average Response (dF/F0)')
 
 # Bottom-right: Response amplitude for non-rewarded mice
 nonrewarded_avg = data_plot_avg_all[data_plot_avg_all['reward_group'] == 'R-']
 sns.barplot(data=nonrewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='#c959affe', ax=axes[1, 1])
+sns.swarmplot(data=nonrewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='black', alpha=0.5, size=4, ax=axes[1, 1])
 axes[1, 1].set_title('Response Amplitude (Non-Rewarded Mice)')
 axes[1, 1].set_ylabel('Average Response (dF/F0)')
 
@@ -580,7 +372,9 @@ plt.savefig(os.path.join(output_dir, svg_file), format='svg', dpi=300)
 
 
 
-fig, axes = plt.subplots(2, 4, figsize=(12, 5), sharex=False, sharey=True)
+# A4 width is 8.27 inches, so 2/3 of A4 is about 5.5 inches per row.
+# For 4 columns, set width to 8.27 * (2/3) ≈ 5.5, height to keep aspect ratio.
+fig, axes = plt.subplots(2, 4, figsize=(8.27 * 2 / 3, 5* 2 / 3), sharex=False, sharey=True)
 
 # S2 PSTH
 rewarded_data = data_plot_psth_proj[(data_plot_psth_proj['reward_group'] == 'R+') & (data_plot_psth_proj['cell_type'] == 'wS2')]
@@ -600,13 +394,17 @@ axes[1, 0].axvline(0, color='orange', linestyle='-')
 # S2 Response amplitude
 rewarded_avg = data_plot_avg_proj[(data_plot_avg_proj['reward_group'] == 'R+') & (data_plot_avg_proj['cell_type'] == 'wS2')]
 sns.barplot(data=rewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='#1b9e77', ax=axes[0, 1])
+sns.swarmplot(data=rewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='black', alpha=0.5, size=4, ax=axes[0, 1])
 axes[0, 1].set_title('Response Amplitude (Rewarded Mice)')
 axes[0, 1].set_ylabel('Average Response (dF/F0)')
+axes[0, 1].set_ylim(-2, 15)
 
 nonrewarded_avg = data_plot_avg_proj[(data_plot_avg_proj['reward_group'] == 'R-') & (data_plot_avg_proj['cell_type'] == 'wS2')]
 sns.barplot(data=nonrewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='#c959affe', ax=axes[1, 1])
+sns.swarmplot(data=nonrewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='black', alpha=0.5, size=4, ax=axes[1, 1])
 axes[1, 1].set_title('Response Amplitude (Non-Rewarded Mice)')
 axes[1, 1].set_ylabel('Average Response (dF/F0)')
+axes[1, 1].set_ylim(-2, 15)
 
 # M1 PSTH
 rewarded_data = data_plot_psth_proj[(data_plot_psth_proj['reward_group'] == 'R+') & (data_plot_psth_proj['cell_type'] == 'wM1')]
@@ -626,13 +424,17 @@ axes[1, 2].axvline(0, color='orange', linestyle='-')
 # M1 Response amplitude
 rewarded_avg = data_plot_avg_proj[(data_plot_avg_proj['reward_group'] == 'R+') & (data_plot_avg_proj['cell_type'] == 'wM1')]
 sns.barplot(data=rewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='#1b9e77', ax=axes[0, 3])
+sns.swarmplot(data=rewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='black', alpha=0.5, size=4, ax=axes[0, 3])
 axes[0, 3].set_title('Response Amplitude (Rewarded Mice)')
 axes[0, 3].set_ylabel('Average Response (dF/F0)')
+axes[0, 3].set_ylim(-2, 15)
 
 nonrewarded_avg = data_plot_avg_proj[(data_plot_avg_proj['reward_group'] == 'R-') & (data_plot_avg_proj['cell_type'] == 'wM1')]
 sns.barplot(data=nonrewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='#c959affe', ax=axes[1, 3])
+sns.swarmplot(data=nonrewarded_avg, x='learning_period', y='average_response', order=['pre','post'], color='black', alpha=0.5, size=4, ax=axes[1, 3])
 axes[1, 3].set_title('Response Amplitude (Non-Rewarded Mice)')
 axes[1, 3].set_ylabel('Average Response (dF/F0)')
+axes[1, 3].set_ylim(-2, 15)
 
 sns.despine()
 

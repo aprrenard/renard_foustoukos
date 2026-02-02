@@ -38,7 +38,7 @@ n_map_trials = 40  # Number of mapping trials to use
 # Template and event detection parameters
 threshold_type = 'percentile'  # Options: 'percentile' or 'max' (FWER)
 threshold_mode = 'mouse'  # Options: 'mouse' (baseline-derived, same for all days) or 'day' (per-day thresholds)
-threshold_dff = 5  # 5% dff threshold for including cells in template (use None for all cells)
+threshold_dff = None  # 5% dff threshold for including cells in template (use None for all cells)
 threshold_corr = 0.45  # Default correlation threshold for event detection (if no surrogate thresholds available)
 min_event_distance_ms = 200  # Minimum distance between events (ms)
 min_event_distance_frames = int(min_event_distance_ms / 1000 * sampling_rate)
@@ -3302,8 +3302,8 @@ if __name__ == "__main__":
         raise ValueError(f"Invalid mode: '{mode}'. Must be 'compute' or 'analyze'")
 
     # Generate threshold comparison plots
-    threshold_pdf_path = os.path.join(save_dir, 'threshold_comparison.pdf')
-    plot_threshold_comparison(threshold_pdf_path)
+    # threshold_pdf_path = os.path.join(save_dir, 'threshold_comparison.pdf')
+    # plot_threshold_comparison(threshold_pdf_path)
 
     # Generate across-mice comparison figures (combining R+ and R-)
     print("\n" + "="*60)

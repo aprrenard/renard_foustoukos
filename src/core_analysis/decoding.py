@@ -241,11 +241,9 @@ print(f"Mean accuracy R-: {np.nanmean(accs_nonrew):.3f} +/- {np.nanstd(accs_nonr
 
 # Plot
 plt.figure(figsize=(4, 5))
-# Plot chance levels in grey
-sns.pointplot(data=[chance_rew, chance_nonrew], color='grey', estimator=np.nanmean, errorbar='ci', linestyles="none")
 # Plot actual accuracies
+sns.barplot(data=[accs_rew, accs_nonrew], palette=reward_palette[::-1], linestyle=None, estimator=np.nanmean, errorbar='ci')
 sns.swarmplot(data=[accs_rew, accs_nonrew], palette=reward_palette[::-1], alpha=0.7)
-sns.pointplot(data=[accs_rew, accs_nonrew], palette=reward_palette[::-1], linestyle=None, estimator=np.nanmean, errorbar='ci')
 plt.xticks([0, 1], ['R+', 'R-'])
 plt.ylabel('Cross-validated accuracy')
 plt.title('Pre vs post learning classification accuracy across mice')
@@ -685,8 +683,9 @@ def extract_pairwise_decoding_accuracy(acc_matrices, all_days):
 
 acc_pre_vs_day0_rew, acc_day0_vs_post_rew = extract_pairwise_decoding_accuracy(accs_rew_matrix, all_days)
 acc_pre_vs_day0_nonrew, acc_day0_vs_post_nonrew = extract_pairwise_decoding_accuracy(accs_nonrew_matrix, all_days)
+
 # Bar plot: R+ and R- groups, pre vs day0 and day0 vs post
-fig, axes = plt.subplots(1, 2, figsize=(8, 5), sharey=True)
+fig, axes = plt.subplots(1, 2, figsize=(6, 4), sharey=True)
 
 for ax, group, acc_pre, acc_post, color in zip(
     axes,
@@ -700,9 +699,9 @@ for ax, group, acc_pre, acc_post, color in zip(
         'Accuracy': np.concatenate([acc_pre, acc_post])
     })
     sns.barplot(data=df_plot, x='Comparison', y='Accuracy', errorbar='ci', ax=ax, color=color, alpha=0.7)
-    sns.stripplot(data=df_plot, x='Comparison', y='Accuracy', ax=ax, color=color, alpha=0.5, size=7)
+    sns.swarmplot(data=df_plot, x='Comparison', y='Accuracy', ax=ax, color=color, alpha=0.5, size=7)
     ax.set_title(f'{group} group')
-    ax.set_ylim(0.4, 1.0)
+    ax.set_ylim(0, 1.0)
     ax.axhline(0.5, color='grey', linestyle='--', alpha=0.5)
     stat, pval = wilcoxon(acc_pre, acc_post, alternative='two-sided')
     ax.text(0.5, 0.95, f'Wilcoxon p={pval:.3f}', ha='center', va='top', transform=ax.transAxes, fontsize=10)
@@ -1433,173 +1432,7 @@ for group in ['R+', 'R-']:
         print(f"  Mice with significant positive slope (p<0.05): {n_sig}/{n_total} ({100*n_sig/n_total:.1f}%)")
 
 
-# Method 2: First vs Last Quartile Comparison
-# --------------------------------------------
-print("\n" + "-"*80)
-print("METHOD 2: First vs Last Quartile Comparison")
-print("Test if decision values in last quartile > first quartile\n")
 
-quartile_diffs = []
-quartile_pvals = []
-quartile_mice = []
-quartile_groups = []
-
-for mouse in results_combined['mouse_id'].unique():
-    mouse_data = results_combined[results_combined['mouse_id'] == mouse]
-    reward_group = mouse_data['reward_group'].iloc[0]
-    
-    # Sort by trial
-    if align_to_learning and 'trial_center_aligned' in mouse_data.columns:
-        mouse_data_sorted = mouse_data.sort_values('trial_center_aligned')
-    else:
-        mouse_data_sorted = mouse_data.sort_values('trial_center')
-    
-    n = len(mouse_data_sorted)
-    if n < 20:
-        continue
-    
-    # Split into quartiles
-    q1_end = n // 4
-    q4_start = 3 * n // 4
-    
-    dec_first_q = mouse_data_sorted.iloc[:q1_end]['mean_decision_value'].values
-    dec_last_q = mouse_data_sorted.iloc[q4_start:]['mean_decision_value'].values
-    
-    # Paired test
-    from scipy.stats import mannwhitneyu
-    stat, p_value = mannwhitneyu(dec_last_q, dec_first_q, alternative='greater')
-    
-    mean_diff = np.mean(dec_last_q) - np.mean(dec_first_q)
-    
-    quartile_diffs.append(mean_diff)
-    quartile_pvals.append(p_value)
-    quartile_mice.append(mouse)
-    quartile_groups.append(reward_group)
-    
-    print(f"{mouse} ({reward_group}): Q4-Q1={mean_diff:.3f}, p={p_value:.4f} {'***' if p_value < 0.001 else '**' if p_value < 0.01 else '*' if p_value < 0.05 else 'n.s.'}")
-
-df_quartiles = pd.DataFrame({
-    'mouse_id': quartile_mice,
-    'reward_group': quartile_groups,
-    'quartile_diff': quartile_diffs,
-    'p_value': quartile_pvals
-})
-
-print("\nPopulation-level statistics:")
-for group in ['R+', 'R-']:
-    sub = df_quartiles[df_quartiles['reward_group'] == group]
-    if len(sub) >= 3:
-        stat_w, p_wilcox = wilcoxon(sub['quartile_diff'].values, alternative='greater')
-        stat_t, p_ttest = ttest_1samp(sub['quartile_diff'].values, 0, alternative='greater')
-        
-        n_sig = np.sum(sub['p_value'] < 0.05)
-        n_total = len(sub)
-        
-        print(f"\n{group} Group (N={n_total}):")
-        print(f"  Mean Q4-Q1 difference: {np.mean(sub['quartile_diff'].values):.3f} ± {np.std(sub['quartile_diff'].values):.3f}")
-        print(f"  Wilcoxon test (H0: median diff ≤ 0): p={p_wilcox:.4f}")
-        print(f"  t-test (H0: mean diff ≤ 0): p={p_ttest:.4f}")
-        print(f"  Mice with significant increase (p<0.05): {n_sig}/{n_total} ({100*n_sig/n_total:.1f}%)")
-
-
-# Method 3: Monotonic Trend Test (Mann-Kendall)
-# ----------------------------------------------
-print("\n" + "-"*80)
-print("METHOD 3: Mann-Kendall Monotonic Trend Test")
-print("Non-parametric test for monotonic trend (increasing or decreasing)\n")
-
-def mann_kendall_test(x):
-    """
-    Mann-Kendall test for monotonic trend.
-    Returns: tau (Kendall's tau), p-value (two-sided)
-    """
-    n = len(x)
-    s = 0
-    for i in range(n-1):
-        for j in range(i+1, n):
-            s += np.sign(x[j] - x[i])
-    
-    # Variance calculation (without correction for ties)
-    var_s = n * (n - 1) * (2 * n + 5) / 18
-    
-    if s > 0:
-        z = (s - 1) / np.sqrt(var_s)
-    elif s < 0:
-        z = (s + 1) / np.sqrt(var_s)
-    else:
-        z = 0
-    
-    # Two-sided p-value
-    from scipy.stats import norm
-    p_value = 2 * (1 - norm.cdf(abs(z)))
-    
-    # Kendall's tau
-    tau = s / (0.5 * n * (n - 1))
-    
-    return tau, p_value, z
-
-mk_taus = []
-mk_pvals = []
-mk_zscores = []
-mk_mice = []
-mk_groups = []
-
-for mouse in results_combined['mouse_id'].unique():
-    mouse_data = results_combined[results_combined['mouse_id'] == mouse]
-    reward_group = mouse_data['reward_group'].iloc[0]
-    
-    # Sort by trial
-    if align_to_learning and 'trial_center_aligned' in mouse_data.columns:
-        mouse_data_sorted = mouse_data.sort_values('trial_center_aligned')
-    else:
-        mouse_data_sorted = mouse_data.sort_values('trial_center')
-    
-    y = mouse_data_sorted['mean_decision_value'].values
-    
-    if len(y) < 5:
-        continue
-    
-    tau, p_value, z_score = mann_kendall_test(y)
-    
-    mk_taus.append(tau)
-    mk_pvals.append(p_value)
-    mk_zscores.append(z_score)
-    mk_mice.append(mouse)
-    mk_groups.append(reward_group)
-    
-    # One-sided interpretation (positive trend)
-    p_onesided = p_value / 2 if z_score > 0 else 1 - p_value / 2
-    
-    print(f"{mouse} ({reward_group}): tau={tau:.3f}, z={z_score:.2f}, p(increasing)={p_onesided:.4f} {'***' if p_onesided < 0.001 else '**' if p_onesided < 0.01 else '*' if p_onesided < 0.05 else 'n.s.'}")
-
-df_mk = pd.DataFrame({
-    'mouse_id': mk_mice,
-    'reward_group': mk_groups,
-    'kendall_tau': mk_taus,
-    'p_value': mk_pvals,
-    'z_score': mk_zscores
-})
-
-print("\nPopulation-level statistics:")
-for group in ['R+', 'R-']:
-    sub = df_mk[df_mk['reward_group'] == group]
-    if len(sub) >= 3:
-        # Test if z-scores are significantly positive
-        stat_w, p_wilcox = wilcoxon(sub['z_score'].values, alternative='greater')
-        stat_t, p_ttest = ttest_1samp(sub['z_score'].values, 0, alternative='greater')
-        
-        # Count mice with positive trend
-        n_pos = np.sum(sub['z_score'] > 0)
-        n_sig = np.sum((sub['z_score'] > 0) & (sub['p_value'] < 0.10))  # One-sided p < 0.05 = two-sided p < 0.10
-        n_total = len(sub)
-        
-        print(f"\n{group} Group (N={n_total}):")
-        print(f"  Mean Kendall's tau: {np.mean(sub['kendall_tau'].values):.3f} ± {np.std(sub['kendall_tau'].values):.3f}")
-        print(f"  Mean z-score: {np.mean(sub['z_score'].values):.2f} ± {np.std(sub['z_score'].values):.2f}")
-        print(f"  Wilcoxon test on z-scores (H0: median ≤ 0): p={p_wilcox:.4f}")
-        print(f"  t-test on z-scores (H0: mean ≤ 0): p={p_ttest:.4f}")
-        print(f"  Mice with positive trend: {n_pos}/{n_total} ({100*n_pos/n_total:.1f}%)")
-        print(f"  Mice with significant positive trend (p<0.05): {n_sig}/{n_total} ({100*n_sig/n_total:.1f}%)")
 
 
 # Save individual mouse results to CSV
@@ -1612,14 +1445,6 @@ print("-"*80 + "\n")
 df_slopes.to_csv(os.path.join(output_dir, 'progressive_learning_slopes.csv'), index=False)
 print(f"Saved: progressive_learning_slopes.csv")
 
-# Save quartile data
-df_quartiles.to_csv(os.path.join(output_dir, 'progressive_learning_quartiles.csv'), index=False)
-print(f"Saved: progressive_learning_quartiles.csv")
-
-# Save Mann-Kendall data
-df_mk.to_csv(os.path.join(output_dir, 'progressive_learning_mann_kendall.csv'), index=False)
-print(f"Saved: progressive_learning_mann_kendall.csv")
-
 
 # Compute and save population-level statistics
 # ---------------------------------------------
@@ -1627,7 +1452,7 @@ print(f"Saved: progressive_learning_mann_kendall.csv")
 population_stats = []
 
 for group in ['R+', 'R-']:
-    # Method 1: Slopes
+    # Slopes
     sub_slope = df_slopes[df_slopes['reward_group'] == group]
     if len(sub_slope) >= 3:
         stat_w_slope, p_wilcox_slope = wilcoxon(sub_slope['slope'].values, alternative='greater')
@@ -1648,50 +1473,6 @@ for group in ['R+', 'R-']:
             'p_wilcoxon': p_wilcox_slope,
             'p_ttest': p_ttest_slope
         })
-    
-    # Method 2: Quartiles
-    sub_quart = df_quartiles[df_quartiles['reward_group'] == group]
-    if len(sub_quart) >= 3:
-        stat_w_quart, p_wilcox_quart = wilcoxon(sub_quart['quartile_diff'].values, alternative='greater')
-        stat_t_quart, p_ttest_quart = ttest_1samp(sub_quart['quartile_diff'].values, 0, alternative='greater')
-        n_pos_quart = np.sum(sub_quart['quartile_diff'] > 0)
-        n_sig_quart = np.sum(sub_quart['p_value'] < 0.05)
-        mean_quart = np.mean(sub_quart['quartile_diff'].values)
-        std_quart = np.std(sub_quart['quartile_diff'].values)
-        
-        population_stats.append({
-            'reward_group': group,
-            'method': 'Q4-Q1 Difference',
-            'mean_value': mean_quart,
-            'std_value': std_quart,
-            'n_positive': n_pos_quart,
-            'n_significant': n_sig_quart,
-            'n_total': len(sub_quart),
-            'p_wilcoxon': p_wilcox_quart,
-            'p_ttest': p_ttest_quart
-        })
-    
-    # Method 3: Mann-Kendall z-scores
-    sub_mk = df_mk[df_mk['reward_group'] == group]
-    if len(sub_mk) >= 3:
-        stat_w_mk, p_wilcox_mk = wilcoxon(sub_mk['z_score'].values, alternative='greater')
-        stat_t_mk, p_ttest_mk = ttest_1samp(sub_mk['z_score'].values, 0, alternative='greater')
-        n_pos_mk = np.sum(sub_mk['z_score'] > 0)
-        n_sig_mk = np.sum((sub_mk['z_score'] > 0) & (sub_mk['p_value'] < 0.10))
-        mean_mk = np.mean(sub_mk['z_score'].values)
-        std_mk = np.std(sub_mk['z_score'].values)
-        
-        population_stats.append({
-            'reward_group': group,
-            'method': 'Mann-Kendall z-score',
-            'mean_value': mean_mk,
-            'std_value': std_mk,
-            'n_positive': n_pos_mk,
-            'n_significant': n_sig_mk,
-            'n_total': len(sub_mk),
-            'p_wilcoxon': p_wilcox_mk,
-            'p_ttest': p_ttest_mk
-        })
 
 df_population_stats = pd.DataFrame(population_stats)
 df_population_stats.to_csv(os.path.join(output_dir, 'progressive_learning_population_statistics.csv'), index=False)
@@ -1701,67 +1482,59 @@ print(f"Saved: progressive_learning_population_statistics.csv")
 # Population-level statistics visualization
 # ------------------------------------------
 
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+fig, ax = plt.subplots(1, 1, figsize=(6, 5))
 
-methods = ['Linear Slope', 'Q4-Q1 Difference', 'Mann-Kendall z-score']
-data_sources = [df_slopes, df_quartiles, df_mk]
-value_cols = ['slope', 'quartile_diff', 'z_score']
-ylabels = ['Slope (per trial)', 'Q4 - Q1 difference', 'Mann-Kendall z-score']
+# Prepare data for plotting
+plot_data = []
+for group in ['R+', 'R-']:
+    sub = df_slopes[df_slopes['reward_group'] == group]
+    for val in sub['slope'].values:
+        plot_data.append({'group': group, 'value': val})
 
-for idx, (method, data_source, value_col, ylabel) in enumerate(zip(methods, data_sources, value_cols, ylabels)):
-    ax = axes[idx]
-    
-    # Prepare data for plotting
-    plot_data = []
-    for group in ['R+', 'R-']:
-        sub = data_source[data_source['reward_group'] == group]
-        for val in sub[value_col].values:
-            plot_data.append({'group': group, 'value': val})
-    
-    df_plot = pd.DataFrame(plot_data)
-    
-    # Strip plot with individual mice
-    sns.swarmplot(data=df_plot, x='group', y='value', palette=reward_palette[::-1], 
-                 ax=ax, size=8, alpha=0.6)
-    
-    # Overlay mean with error bars (CI)
-    sns.pointplot(data=df_plot, x='group', y='value', palette=reward_palette[::-1],
-                 ax=ax, errorbar='ci', )
-    
-    # Add horizontal line at 0
-    ax.axhline(0, color='black', linestyle='--', alpha=0.5, linewidth=1)
-    
-    # Add p-values as text
-    for i, group in enumerate(['R+', 'R-']):
-        pop_stat = df_population_stats[(df_population_stats['reward_group'] == group) & 
-                                       (df_population_stats['method'] == method)]
-        if not pop_stat.empty:
-            p_wilcox = pop_stat['p_wilcoxon'].values[0]
-            p_text = f"p={p_wilcox:.4f}" if p_wilcox >= 0.001 else "p<0.001"
-            
-            # Add significance stars
-            if p_wilcox < 0.001:
-                sig_text = "***"
-            elif p_wilcox < 0.01:
-                sig_text = "**"
-            elif p_wilcox < 0.05:
-                sig_text = "*"
-            else:
-                sig_text = "n.s."
-            
-            # Position text above the data
-            y_max = df_plot[df_plot['group'] == group]['value'].max()
-            y_pos = y_max + 0.1 * (ax.get_ylim()[1] - ax.get_ylim()[0])
-            ax.text(i, y_pos, f"{p_text}\n{sig_text}", ha='center', va='bottom', 
-                   fontsize=9, fontweight='bold')
-    
-    ax.set_xlabel('Reward Group', fontsize=11)
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.set_title(f'{method}\nPopulation Test (Wilcoxon)', fontsize=12, fontweight='bold')
-    
-    # Set y-lim to include text
-    y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
-    ax.set_ylim(ax.get_ylim()[0], ax.get_ylim()[1] + 0.15 * y_range)
+df_plot = pd.DataFrame(plot_data)
+
+# Strip plot with individual mice
+sns.swarmplot(data=df_plot, x='group', y='value', palette=reward_palette[::-1], 
+             ax=ax, size=8, alpha=0.6)
+
+# Overlay mean with error bars (CI)
+sns.pointplot(data=df_plot, x='group', y='value', palette=reward_palette[::-1],
+             ax=ax, errorbar='ci', markersize=10, join=False)
+
+# Add horizontal line at 0
+ax.axhline(0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+
+# Add p-values as text
+for i, group in enumerate(['R+', 'R-']):
+    pop_stat = df_population_stats[(df_population_stats['reward_group'] == group) & 
+                                   (df_population_stats['method'] == 'Linear Slope')]
+    if not pop_stat.empty:
+        p_wilcox = pop_stat['p_wilcoxon'].values[0]
+        p_text = f"p={p_wilcox:.4f}" if p_wilcox >= 0.001 else "p<0.001"
+        
+        # Add significance stars
+        if p_wilcox < 0.001:
+            sig_text = "***"
+        elif p_wilcox < 0.01:
+            sig_text = "**"
+        elif p_wilcox < 0.05:
+            sig_text = "*"
+        else:
+            sig_text = "n.s."
+        
+        # Position text above the data
+        y_max = df_plot[df_plot['group'] == group]['value'].max()
+        y_pos = y_max + 0.1 * (ax.get_ylim()[1] - ax.get_ylim()[0])
+        ax.text(i, y_pos, f"{p_text}\n{sig_text}", ha='center', va='bottom', 
+               fontsize=9, fontweight='bold')
+
+ax.set_xlabel('Reward Group', fontsize=11)
+ax.set_ylabel('Slope (per trial)', fontsize=11)
+ax.set_title('Linear Slope\nPopulation Test (Wilcoxon)', fontsize=12, fontweight='bold')
+
+# Set y-lim to include text
+y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
+ax.set_ylim(ax.get_ylim()[0], ax.get_ylim()[1] + 0.15 * y_range)
 
 plt.tight_layout()
 sns.despine()
@@ -1774,10 +1547,10 @@ print(f"Saved: progressive_learning_population_statistics figure")
 # Summary visualization of individual mice
 # -----------------------------------------
 
-fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
 # Panel 1: Slopes per mouse
-ax = axes[0, 0]
+ax = axes[0]
 for group, color in zip(['R+', 'R-'], reward_palette[::-1]):
     sub = df_slopes[df_slopes['reward_group'] == group]
     x = np.arange(len(sub))
@@ -1795,47 +1568,8 @@ ax.set_title('Linear Trend per Mouse\n(* = p<0.05)')
 ax.legend()
 ax.set_xticks([])
 
-# Panel 2: Quartile differences
-ax = axes[0, 1]
-for group, color in zip(['R+', 'R-'], reward_palette[::-1]):
-    sub = df_quartiles[df_quartiles['reward_group'] == group]
-    x = np.arange(len(sub))
-    ax.bar(x + (0.4 if group == 'R+' else 0), sub['quartile_diff'].values,
-           width=0.4, color=color, alpha=0.7, label=group)
-    sig_mask = sub['p_value'].values < 0.05
-    ax.scatter(x[sig_mask] + (0.4 if group == 'R+' else 0),
-              sub['quartile_diff'].values[sig_mask],
-              marker='*', s=200, color='black', zorder=10)
-ax.axhline(0, color='black', linestyle='--', alpha=0.5)
-ax.set_xlabel('Mouse')
-ax.set_ylabel('Q4 - Q1 (decision value)')
-ax.set_title('Last vs First Quartile\n(* = p<0.05)')
-ax.legend()
-ax.set_xticks([])
-
-# Panel 3: Mann-Kendall z-scores
-ax = axes[1, 0]
-for group, color in zip(['R+', 'R-'], reward_palette[::-1]):
-    sub = df_mk[df_mk['reward_group'] == group]
-    x = np.arange(len(sub))
-    ax.bar(x + (0.4 if group == 'R+' else 0), sub['z_score'].values,
-           width=0.4, color=color, alpha=0.7, label=group)
-    sig_mask = sub['p_value'].values < 0.10  # Two-sided p<0.10 = one-sided p<0.05
-    pos_mask = sub['z_score'].values > 0
-    ax.scatter(x[sig_mask & pos_mask] + (0.4 if group == 'R+' else 0),
-              sub['z_score'].values[sig_mask & pos_mask],
-              marker='*', s=200, color='black', zorder=10)
-ax.axhline(0, color='black', linestyle='--', alpha=0.5)
-ax.axhline(1.96, color='red', linestyle=':', alpha=0.3, label='p=0.05')
-ax.axhline(-1.96, color='red', linestyle=':', alpha=0.3)
-ax.set_xlabel('Mouse')
-ax.set_ylabel('Mann-Kendall z-score')
-ax.set_title('Monotonic Trend Test\n(* = p<0.05, increasing)')
-ax.legend()
-ax.set_xticks([])
-
-# Panel 4: Summary statistics
-ax = axes[1, 1]
+# Panel 2: Summary statistics
+ax = axes[1]
 ax.axis('off')
 
 summary_text = "SUMMARY OF PROGRESSIVE LEARNING\n"
@@ -1855,31 +1589,9 @@ for group in ['R+', 'R-']:
     summary_text += f"  {n_pos_slope}/{len(sub_slope)} positive slopes\n"
     summary_text += f"  {n_sig_slope}/{len(sub_slope)} significant (p<0.05)\n"
     summary_text += f"  Population p = {p_slope:.4f}\n\n"
-    
-    # Quartile analysis
-    sub_quart = df_quartiles[df_quartiles['reward_group'] == group]
-    n_pos_quart = np.sum(sub_quart['quartile_diff'] > 0)
-    n_sig_quart = np.sum(sub_quart['p_value'] < 0.05)
-    stat_w, p_quart = wilcoxon(sub_quart['quartile_diff'].values, alternative='greater')
-    
-    summary_text += f"Quartile Comparison:\n"
-    summary_text += f"  {n_pos_quart}/{len(sub_quart)} positive changes\n"
-    summary_text += f"  {n_sig_quart}/{len(sub_quart)} significant (p<0.05)\n"
-    summary_text += f"  Population p = {p_quart:.4f}\n\n"
-    
-    # Mann-Kendall
-    sub_mk = df_mk[df_mk['reward_group'] == group]
-    n_pos_mk = np.sum(sub_mk['z_score'] > 0)
-    n_sig_mk = np.sum((sub_mk['z_score'] > 0) & (sub_mk['p_value'] < 0.10))
-    stat_w, p_mk = wilcoxon(sub_mk['z_score'].values, alternative='greater')
-    
-    summary_text += f"Mann-Kendall Test:\n"
-    summary_text += f"  {n_pos_mk}/{len(sub_mk)} positive trends\n"
-    summary_text += f"  {n_sig_mk}/{len(sub_mk)} significant (p<0.05)\n"
-    summary_text += f"  Population p = {p_mk:.4f}\n\n"
 
 ax.text(0.05, 0.95, summary_text, transform=ax.transAxes,
-        fontsize=9, verticalalignment='top', fontfamily='monospace')
+        fontsize=11, verticalalignment='top', fontfamily='monospace')
 
 plt.tight_layout()
 sns.despine()
@@ -2152,76 +1864,6 @@ print("CORRELATION ANALYSIS COMPLETE")
 print("="*80 + "\n")
 
 
-
-
-
-
- 
-# ############################################################################
-# Illustration of the result for two example mice.
-# ############################################################################
-# Find the R+ and R- mouse with highest correlation between behavior and decision value
-best_rplus = df_corr[df_corr['reward_group'] == 'R+'].sort_values('correlation', ascending=False).iloc[0]['mouse_id']
-best_rminus = df_corr[df_corr['reward_group'] == 'R-'].sort_values('correlation', ascending=False).iloc[1]['mouse_id']
-example_mice = [best_rplus, best_rminus]
-
-# Improved publication-quality figure: one figure, one column per mouse, reward color palette 
-fig, axes = plt.subplots(2, len(example_mice), figsize=(7 , 7), sharex=False)
-
-for col, mouse in enumerate(example_mice):
-    # Panel 1: Behavioral performance (whisker trials only)
-    bh_mouse = bh_df[(bh_df['mouse_id'] == mouse) & (bh_df['whisker_stim'] == 1)]
-    color = reward_palette[1] if results_combined[results_combined['mouse_id'] == mouse]['reward_group'].iloc[0] == 'R+' else reward_palette[0]
-    ax_beh = axes[0, col]
-    # Cut to first 120 trials for reward mouse
-    if results_combined[results_combined['mouse_id'] == mouse]['reward_group'].iloc[0] == 'R+':
-        bh_mouse = bh_mouse[bh_mouse['trial_w'] < 120]
-    if not bh_mouse.empty:
-        sns.lineplot(data=bh_mouse, x='trial_w', y='learning_curve_w', ax=ax_beh, color=color, linewidth=2.5)
-        ax_beh.set_ylabel('Performance (whisker trials)', fontsize=13)
-        ax_beh.set_ylim(0, 1)
-        ax_beh.tick_params(axis='both', labelsize=12)
-        ax_beh.spines['top'].set_visible(False)
-        ax_beh.spines['right'].set_visible(False)
-    else:
-        ax_beh.set_title(f"{mouse}: No behavioral data", fontsize=14, fontweight='bold')
-    # Panel 2: Decision values (same trials)
-    dec_mouse = results_combined[results_combined['mouse_id'] == mouse]
-    ax_dec = axes[1, col]
-    if not dec_mouse.empty and not bh_mouse.empty:
-        common_trials = np.intersect1d(dec_mouse['trial_start'], bh_mouse['trial_w'])
-        dec_plot = dec_mouse.set_index('trial_start').loc[common_trials]
-        sns.lineplot(x=common_trials, y=dec_plot['mean_decision_value'], ax=ax_dec, color=color, linewidth=2.5)
-        ax_dec.set_ylabel('Decoder Decision Value', fontsize=13)
-        ax_dec.tick_params(axis='both', labelsize=12)
-        ax_dec.spines['top'].set_visible(False)
-        ax_dec.spines['right'].set_visible(False)
-        # Set different y-limits for R+ and R-
-        if results_combined[results_combined['mouse_id'] == mouse]['reward_group'].iloc[0] == 'R+':
-            ax_dec.set_ylim([-5, 3])
-            yticks = np.arange(-5, 4, 1)
-        else:
-            ax_dec.set_ylim([-4, 3])
-            yticks = np.arange(-4, 4, 1)
-        ax_dec.set_yticks(yticks)
-        ax_dec.set_yticklabels([str(y) for y in yticks], fontsize=12)
-        ax_dec.axhline(0, color='gray', linestyle='--', linewidth=1)
-    else:
-        ax_dec.set_title(f"{mouse}: No decoder data", fontsize=14, fontweight='bold')
-    ax_dec.set_xlabel('Trial within Day 0', fontsize=13)
-
-# Shared x-label for bottom row
-for ax in axes[1, :]:
-    ax.set_xlabel('Trial within Day 0', fontsize=13)
-
-plt.tight_layout(h_pad=2.5)
-sns.despine()
-
-# Save to SVG
-output_dir = '/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/day0_learning/gradual_learning'
-output_dir = io.adjust_path_to_host(output_dir)
-plt.savefig(os.path.join(output_dir, 'example_mice_behavior_decision_value.svg'), format='svg', dpi=300)
-plt.close(fig)
 
  
 # ############################################################################

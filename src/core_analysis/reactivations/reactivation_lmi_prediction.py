@@ -79,7 +79,7 @@ prominence = 0.15  # Minimum prominence of peaks for event detection (vertical d
 # Participation parameters
 event_window_ms = 150  # ±150ms around event (total 300ms)
 event_window_frames = int(event_window_ms / 1000 * sampling_rate)  # ±5 frames
-participation_threshold = 0.05  # 5% dF/F for participation
+participation_threshold = 0.1  # 5% dF/F for participation
 min_events_for_reliability = 5  # Flag estimates based on < 5 events
 
 # LMI thresholds (matches characterize_LMI_cells.py)

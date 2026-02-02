@@ -548,18 +548,73 @@ results_df.to_csv(os.path.join(output_dir, 'prop_lmi_mannwhitney_results.csv'), 
 
 # Plot.
 fig, axes = plt.subplots(1, 6, figsize=(15, 3), sharey=True)
-sns.barplot(data=lmi_prop, x='reward_group', order=['R+', 'R-'], hue='reward_group', y='lmi_pos', ax=axes[0], palette=reward_palette, hue_order=['R-', 'R+'], legend=False)
+
+# All cells: LMI Positive
+sns.barplot(
+    data=lmi_prop, x='reward_group', order=['R+', 'R-'], hue='reward_group',
+    y='lmi_pos', ax=axes[0], palette=reward_palette, hue_order=['R-', 'R+'], legend=False
+)
+sns.swarmplot(
+    data=lmi_prop, x='reward_group', order=['R+', 'R-'],
+    y='lmi_pos', ax=axes[0], color='k', size=4, alpha=0.7
+)
 axes[0].set_title('LMI Positive')
-sns.barplot(data=lmi_prop, x='reward_group',  order=['R+', 'R-'], hue='reward_group', y='lmi_neg',  ax=axes[1], palette=reward_palette, hue_order=['R-', 'R+'], legend=False)
+
+# All cells: LMI Negative
+sns.barplot(
+    data=lmi_prop, x='reward_group', order=['R+', 'R-'], hue='reward_group',
+    y='lmi_neg', ax=axes[1], palette=reward_palette, hue_order=['R-', 'R+'], legend=False
+)
+sns.swarmplot(
+    data=lmi_prop, x='reward_group', order=['R+', 'R-'],
+    y='lmi_neg', ax=axes[1], color='k', size=4, alpha=0.7
+)
 axes[1].set_title('LMI Negative')
-sns.barplot(data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wS2'], x='reward_group',  order=['R+', 'R-'], hue='reward_group', y='lmi_pos', ax=axes[2], palette=reward_palette, hue_order=['R-', 'R+'], legend=False)
+
+# wS2: LMI Positive
+sns.barplot(
+    data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wS2'], x='reward_group', order=['R+', 'R-'], hue='reward_group',
+    y='lmi_pos', ax=axes[2], palette=reward_palette, hue_order=['R-', 'R+'], legend=False
+)
+sns.swarmplot(
+    data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wS2'], x='reward_group', order=['R+', 'R-'],
+    y='lmi_pos', ax=axes[2], color='k', size=4, alpha=0.7
+)
 axes[2].set_title('LMI Positive wS2')
-sns.barplot(data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wS2'], x='reward_group',  order=['R+', 'R-'], hue='reward_group', y='lmi_neg', ax=axes[3], palette=reward_palette, hue_order=['R-', 'R+'], legend=False)
+
+# wS2: LMI Negative
+sns.barplot(
+    data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wS2'], x='reward_group', order=['R+', 'R-'], hue='reward_group',
+    y='lmi_neg', ax=axes[3], palette=reward_palette, hue_order=['R-', 'R+'], legend=False
+)
+sns.swarmplot(
+    data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wS2'], x='reward_group', order=['R+', 'R-'],
+    y='lmi_neg', ax=axes[3], color='k', size=4, alpha=0.7
+)
 axes[3].set_title('LMI Negative wS2')
-sns.barplot(data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wM1'], x='reward_group',  order=['R+', 'R-'], hue='reward_group', y='lmi_pos', ax=axes[4], palette=reward_palette, hue_order=['R-', 'R+'], legend=False)
+
+# wM1: LMI Positive
+sns.barplot(
+    data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wM1'], x='reward_group', order=['R+', 'R-'], hue='reward_group',
+    y='lmi_pos', ax=axes[4], palette=reward_palette, hue_order=['R-', 'R+'], legend=False
+)
+sns.swarmplot(
+    data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wM1'], x='reward_group', order=['R+', 'R-'],
+    y='lmi_pos', ax=axes[4], color='k', size=4, alpha=0.7
+)
 axes[4].set_title('LMI Positive wM1')
-sns.barplot(data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wM1'], x='reward_group',  order=['R+', 'R-'], hue='reward_group', y='lmi_neg', ax=axes[5], palette=reward_palette, hue_order=['R-', 'R+'], legend=False)
+
+# wM1: LMI Negative
+sns.barplot(
+    data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wM1'], x='reward_group', order=['R+', 'R-'], hue='reward_group',
+    y='lmi_neg', ax=axes[5], palette=reward_palette, hue_order=['R-', 'R+'], legend=False
+)
+sns.swarmplot(
+    data=lmi_prop_ct.loc[lmi_prop_ct.cell_type=='wM1'], x='reward_group', order=['R+', 'R-'],
+    y='lmi_neg', ax=axes[5], color='k', size=4, alpha=0.7
+)
 axes[5].set_title('LMI Negative wM1')
+
 sns.despine(trim=True)
 
 # Add stars to plots according to computed stats
@@ -578,7 +633,7 @@ for i, (group, cell_type) in enumerate([
     ('lmi_neg', None),
     ('lmi_pos', 'wS2'),
     ('lmi_neg', 'wS2'),
-    ('lmi_pos', 'wM1'),
+    ('lmi_pos', 'wM1'), 
     ('lmi_neg', 'wM1')
 ]):
     stat_row = results_df[(results_df['group'] == group) & (results_df['cell_type'] == (cell_type if cell_type else 'all'))]
@@ -595,7 +650,7 @@ plt.savefig(os.path.join(output_dir, svg_file), format='svg', dpi=300)
 lmi_prop.to_csv(os.path.join(output_dir, 'prop_lmi.csv'), index=False)
 lmi_prop_ct.to_csv(os.path.join(output_dir, 'prop_lmi_ct.csv'), index=False)
  
- 
+
 # LMI distribution across mice: average curve and confidence interval (variance).
 # Use common bin edges for all three plots
 bin_edges = np.histogram_bin_edges(lmi_df['lmi'], bins=30)
@@ -618,8 +673,9 @@ for i, cell_type in enumerate(cell_types):
             ax=axes[i],
             color=color,
             label=rg,
-            stat='density',
-            alpha=0.5,
+            stat='probability',
+            alpha=.5,
+            linewidth=0,  # Set edge width to 0 to remove edges
         )
     axes[i].set_title(titles[i])
     axes[i].set_xlabel('LMI')
@@ -628,19 +684,3 @@ for i, cell_type in enumerate(cell_types):
 sns.despine()
 plt.tight_layout()
 plt.savefig(os.path.join(output_dir, 'lmi_histograms.svg'), format='svg', dpi=300)
-# Statistical test: Kolmogorov-Smirnov test for LMI distributions
-
-ks_results = []
-for cell_type in cell_types:
-    if cell_type:
-        data = lmi_df[lmi_df.cell_type == cell_type]
-    else:
-        data = lmi_df
-    lmi_r_minus = data[data.reward_group == 'R-']['lmi']
-    lmi_r_plus = data[data.reward_group == 'R+']['lmi']
-    stat, p = ks_2samp(lmi_r_minus, lmi_r_plus)
-    ks_results.append({'cell_type': cell_type if cell_type else 'all', 'stat': stat, 'p_value': p})
-
-pd.DataFrame(ks_results).to_csv(os.path.join(output_dir, 'lmi_distribution_ks.csv'), index=False)
-
-

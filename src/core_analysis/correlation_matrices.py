@@ -69,7 +69,7 @@ select_lmi = False
 zscore = False
 projection_type = None  # 'wS2', 'wM1' or None
 n_min_proj = 5
-similarity_metric = 'pearson'
+similarity_metric = 'spearman'
 sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1)
 
 _, _, mice, db = io.select_sessions_from_db(io.db_path,
@@ -357,53 +357,81 @@ for metric in ['within_pre', 'within_post', 'between_pre_post', 'reorganization_
     stats_dict[metric] = p_value
     print(f"{metric:25s}: U={stat:.1f}, p={p_value:.4f} {'***' if p_value < 0.001 else '**' if p_value < 0.01 else '*' if p_value < 0.05 else 'n.s.'}")
 
-# Visualization of metrics
-fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+# Visualization of metrics - Split into two figures
+zscore_str = '_zscore' if zscore else ''
 
-# Combine Pre, Post, and Reorganization Index in one panel
-metrics_long = metrics_combined.melt(
+# Figure 1: Within Pre and Within Post (ylim 0 to 0.3)
+fig1, ax1 = plt.subplots(1, 1, figsize=(5, 5))
+
+metrics_long_within = metrics_combined.melt(
     id_vars=['mouse_id', 'reward_group'],
-    value_vars=['within_pre', 'within_post', 'reorganization_index'],
+    value_vars=['within_pre', 'within_post'],
     var_name='metric', value_name='value'
 )
-sns.swarmplot(data=metrics_long, x='metric', y='value', hue='reward_group',
-              palette=reward_palette[::-1], dodge=True, alpha=0.5, ax=ax, size=4)
-sns.pointplot(data=metrics_long, x='metric', y='value', hue='reward_group',
-              palette=reward_palette[::-1], ax=ax, linestyles='none',
-              errorbar='ci', dodge=True)
-ax.set_ylim(0, .3)
-ax.set_xlabel('')
-ax.set_ylabel('Value')
-ax.set_title('Network Reorganization Metrics')
-ax.legend(title='Group')
-ax.set_xticklabels(['Within Pre', 'Within Post', 'Reorganization\nIndex'])
-ax.set_ylim(0, None)
+sns.barplot(data=metrics_long_within, x='metric', y='value', hue='reward_group',
+            palette=reward_palette[::-1], ax=ax1, errorbar='ci')
+sns.swarmplot(data=metrics_long_within, x='metric', y='value', hue='reward_group',
+              dodge=True, ax=ax1, size=4, color='grey', legend=False)
+ax1.set_ylim(0, 0.3)
+ax1.set_xlabel('')
+ax1.set_ylabel('Correlation')
+ax1.set_title('Within-Period Correlations')
+ax1.legend(title='Group')
+ax1.set_xticklabels(['Within Pre', 'Within Post'])
 
-# Add p-values
-metric_order = ['within_pre', 'within_post', 'reorganization_index']
-for i, metric in enumerate(metric_order):
+# Add p-values for within metrics
+for i, metric in enumerate(['within_pre', 'within_post']):
     p_val = stats_dict[metric]
-    y_max = metrics_long[metrics_long['metric'] == metric]['value'].max()
-    y_pos = y_max * 1.05
-
-    # Format p-value text
     if p_val < 0.001:
         p_text = 'p<0.001'
     elif p_val < 0.01:
         p_text = f'p={p_val:.3f}'
     else:
         p_text = f'p={p_val:.2f}'
-
-    ax.text(i, y_pos*0.98, p_text, ha='center', va='bottom', fontsize=9)
+    ax1.text(i, 0.28, p_text, ha='center', va='bottom', fontsize=9)
 
 sns.despine()
 plt.tight_layout()
 
-# Save figure
-zscore_str = '_zscore' if zscore else ''
-svg_file = f'network_reorganization_metrics_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.svg'
-plt.savefig(os.path.join(output_dir, svg_file), format='svg', dpi=300)
-plt.savefig(os.path.join(output_dir, svg_file.replace('.svg', '.png')), format='png', dpi=300)
+svg_file1 = f'network_within_correlations_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.svg'
+plt.savefig(os.path.join(output_dir, svg_file1), format='svg', dpi=300)
+plt.savefig(os.path.join(output_dir, svg_file1.replace('.svg', '.png')), format='png', dpi=300)
+
+# Figure 2: Reorganization Index (ylim 0 to 0.15)
+fig2, ax2 = plt.subplots(1, 1, figsize=(4, 5))
+
+metrics_long_reorg = metrics_combined.melt(
+    id_vars=['mouse_id', 'reward_group'],
+    value_vars=['reorganization_index'],
+    var_name='metric', value_name='value'
+)
+sns.barplot(data=metrics_long_reorg, x='metric', y='value', hue='reward_group',
+            palette=reward_palette[::-1], ax=ax2, errorbar='ci')
+sns.swarmplot(data=metrics_long_reorg, x='metric', y='value', hue='reward_group',
+              dodge=True, ax=ax2, size=4, color='grey', legend=False)
+ax2.set_ylim(0, 0.15)
+ax2.set_xlabel('')
+ax2.set_ylabel('Reorganization Index')
+ax2.set_title('Network Reorganization')
+ax2.legend(title='Group')
+ax2.set_xticklabels(['Reorganization\nIndex'])
+
+# Add p-value for reorganization index
+p_val = stats_dict['reorganization_index']
+if p_val < 0.001:
+    p_text = 'p<0.001'
+elif p_val < 0.01:
+    p_text = f'p={p_val:.3f}'
+else:
+    p_text = f'p={p_val:.2f}'
+ax2.text(0, 0.14, p_text, ha='center', va='bottom', fontsize=9)
+
+sns.despine()
+plt.tight_layout()
+
+svg_file2 = f'network_reorganization_index_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.svg'
+plt.savefig(os.path.join(output_dir, svg_file2), format='svg', dpi=300)
+plt.savefig(os.path.join(output_dir, svg_file2.replace('.svg', '.png')), format='png', dpi=300)
 
 # Save data
 metrics_combined.to_csv(os.path.join(output_dir, f'network_reorganization_metrics_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.csv'), index=False)
@@ -423,6 +451,247 @@ stats_df = pd.DataFrame(stats_results)
 stats_df.to_csv(os.path.join(output_dir, f'network_reorganization_stats_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.csv'), index=False)
 
 
+# ----------------------------------------------
+# Day 0 Specific Quantification
+# ----------------------------------------------
+
+def compute_day0_metrics(corr_matrices, days, n_map_trials):
+    """
+    Compute metrics to quantify day 0 relationship with pre and post periods.
+
+    Returns per-mouse:
+    - within_day0: average correlation within day 0 trials
+    - reorg_pre_day0: reorganization index between pre days and day 0
+    - reorg_post_day0: reorganization index between post days and day 0
+    """
+
+    results = []
+
+    for cm in corr_matrices:
+        # Define trial indices for each period
+        # Days: -2, -1, 0, 1, 2
+        pre_idx = np.arange(0, 2 * n_map_trials)  # Days -2, -1
+        day0_idx = np.arange(2 * n_map_trials, 3 * n_map_trials)  # Day 0
+        post_idx = np.arange(3 * n_map_trials, 5 * n_map_trials)  # Days 1, 2
+
+        # Within-pre correlations
+        pre_corr = cm[np.ix_(pre_idx, pre_idx)]
+        within_pre = np.nanmean(pre_corr)
+
+        # Within-day0 correlations
+        day0_corr = cm[np.ix_(day0_idx, day0_idx)]
+        within_day0 = np.nanmean(day0_corr)
+
+        # Within-post correlations
+        post_corr = cm[np.ix_(post_idx, post_idx)]
+        within_post = np.nanmean(post_corr)
+
+        # Between pre-day0 correlations
+        between_pre_day0 = np.nanmean(cm[np.ix_(pre_idx, day0_idx)])
+
+        # Between post-day0 correlations
+        between_post_day0 = np.nanmean(cm[np.ix_(post_idx, day0_idx)])
+
+        # Reorganization indices using same formula as before
+        reorg_pre_day0 = (within_pre + within_day0) / 2 - between_pre_day0
+        reorg_post_day0 = (within_post + within_day0) / 2 - between_post_day0
+
+        results.append({
+            'within_day0': within_day0,
+            'reorg_pre_day0': reorg_pre_day0,
+            'reorg_post_day0': reorg_post_day0,
+        })
+
+    return pd.DataFrame(results)
+
+# Compute day 0 metrics for both groups
+day0_metrics_rew = compute_day0_metrics(corr_matrices_rew, days, n_map_trials)
+day0_metrics_rew['reward_group'] = 'R+'
+day0_metrics_rew['mouse_id'] = mice_rew
+
+day0_metrics_nonrew = compute_day0_metrics(corr_matrices_nonrew, days, n_map_trials)
+day0_metrics_nonrew['reward_group'] = 'R-'
+day0_metrics_nonrew['mouse_id'] = mice_nonrew
+
+day0_metrics_combined = pd.concat([day0_metrics_rew, day0_metrics_nonrew], ignore_index=True)
+
+# Print summary statistics
+print("\n" + "="*60)
+print("DAY 0 SPECIFIC METRICS")
+print("="*60)
+for group in ['R+', 'R-']:
+    data = day0_metrics_combined[day0_metrics_combined['reward_group'] == group]
+    print(f"\n{group} Group (N={len(data)}):")
+    print(f"  Within day 0 correlation:   {data['within_day0'].mean():.3f} ± {data['within_day0'].std():.3f}")
+    print(f"  Reorg index (pre vs day0):  {data['reorg_pre_day0'].mean():.3f} ± {data['reorg_pre_day0'].std():.3f}")
+    print(f"  Reorg index (post vs day0): {data['reorg_post_day0'].mean():.3f} ± {data['reorg_post_day0'].std():.3f}")
+
+# Statistical comparison between groups
+print("\n" + "-"*60)
+print("STATISTICAL COMPARISONS (Mann-Whitney U test) - Between groups")
+print("-"*60)
+
+day0_stats_dict = {}
+for metric in ['within_day0', 'reorg_pre_day0', 'reorg_post_day0']:
+    r_plus = day0_metrics_rew[metric].dropna()
+    r_minus = day0_metrics_nonrew[metric].dropna()
+    stat, p_value = mannwhitneyu(r_plus, r_minus, alternative='two-sided')
+    day0_stats_dict[metric] = p_value
+    print(f"{metric:25s}: U={stat:.1f}, p={p_value:.4f} {'***' if p_value < 0.001 else '**' if p_value < 0.01 else '*' if p_value < 0.05 else 'n.s.'}")
+
+# Within-group comparison: pre vs post reorganization (Wilcoxon signed-rank test)
+print("\n" + "-"*60)
+print("WITHIN-GROUP COMPARISONS (Wilcoxon signed-rank test)")
+print("Comparing reorg_pre_day0 vs reorg_post_day0")
+print("-"*60)
+
+within_group_stats = {}
+for group, df in [('R+', day0_metrics_rew), ('R-', day0_metrics_nonrew)]:
+    pre_vals = df['reorg_pre_day0'].dropna().values
+    post_vals = df['reorg_post_day0'].dropna().values
+    stat, p_value = wilcoxon(pre_vals, post_vals, alternative='two-sided')
+    within_group_stats[group] = p_value
+    print(f"{group:5s}: W={stat:.1f}, p={p_value:.4f} {'***' if p_value < 0.001 else '**' if p_value < 0.01 else '*' if p_value < 0.05 else 'n.s.'}")
+
+# Visualization of day 0 metrics - Figure 1: Within Day 0 correlation only
+fig_day0_within, ax_day0_within = plt.subplots(1, 1, figsize=(4, 5))
+
+day0_within_long = day0_metrics_combined.melt(
+    id_vars=['mouse_id', 'reward_group'],
+    value_vars=['within_day0'],
+    var_name='metric', value_name='value'
+)
+sns.barplot(data=day0_within_long, x='metric', y='value', hue='reward_group',
+            palette=reward_palette[::-1], ax=ax_day0_within, errorbar='ci')
+sns.swarmplot(data=day0_within_long, x='metric', y='value', hue='reward_group',
+              dodge=True, ax=ax_day0_within, size=4, color='grey', legend=False)
+ax_day0_within.set_xlabel('')
+ax_day0_within.set_ylabel('Correlation')
+ax_day0_within.set_title('Day 0 Within-Day Correlation')
+ax_day0_within.legend(title='Group')
+ax_day0_within.set_xticklabels(['Within Day 0'])
+ax_day0_within.set_ylim(0, 0.3)
+
+# Add p-value for between-group comparison
+p_val = day0_stats_dict['within_day0']
+y_max = day0_within_long['value'].max()
+y_pos = min(y_max * 1.05, 0.28)
+if p_val < 0.001:
+    p_text = 'p<0.001'
+elif p_val < 0.01:
+    p_text = f'p={p_val:.3f}'
+else:
+    p_text = f'p={p_val:.2f}'
+ax_day0_within.text(0, y_pos, p_text, ha='center', va='bottom', fontsize=9)
+
+sns.despine()
+plt.tight_layout()
+
+# Save day 0 within figure
+svg_file_day0_within = f'day0_within_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.svg'
+plt.savefig(os.path.join(output_dir, svg_file_day0_within), format='svg', dpi=300)
+plt.savefig(os.path.join(output_dir, svg_file_day0_within.replace('.svg', '.png')), format='png', dpi=300)
+
+# Visualization of day 0 metrics - Figure 2: Reorganization indices (pre vs day0 and post vs day0)
+fig_day0_reorg, ax_day0_reorg = plt.subplots(1, 1, figsize=(6, 5))
+
+day0_reorg_long = day0_metrics_combined.melt(
+    id_vars=['mouse_id', 'reward_group'],
+    value_vars=['reorg_pre_day0', 'reorg_post_day0'],
+    var_name='metric', value_name='value'
+)
+sns.barplot(data=day0_reorg_long, x='metric', y='value', hue='reward_group',
+            palette=reward_palette[::-1], ax=ax_day0_reorg, errorbar='ci')
+sns.swarmplot(data=day0_reorg_long, x='metric', y='value', hue='reward_group',
+              dodge=True, ax=ax_day0_reorg, size=4, color='grey', legend=False)
+ax_day0_reorg.set_xlabel('')
+ax_day0_reorg.set_ylabel('Reorganization Index')
+ax_day0_reorg.set_title('Day 0 Reorganization Indices')
+ax_day0_reorg.legend(title='Group')
+ax_day0_reorg.set_xticklabels(['Reorg\n(Pre vs Day0)', 'Reorg\n(Post vs Day0)'])
+ax_day0_reorg.set_ylim(0, 0.15)
+
+# Add p-values for between-group comparisons
+day0_reorg_metrics = ['reorg_pre_day0', 'reorg_post_day0']
+for i, metric in enumerate(day0_reorg_metrics):
+    p_val = day0_stats_dict[metric]
+    y_max = day0_reorg_long[day0_reorg_long['metric'] == metric]['value'].max()
+    y_pos = min(y_max * 1.05, 0.12)
+
+    if p_val < 0.001:
+        p_text = 'p<0.001'
+    elif p_val < 0.01:
+        p_text = f'p={p_val:.3f}'
+    else:
+        p_text = f'p={p_val:.2f}'
+
+    ax_day0_reorg.text(i, y_pos, p_text, ha='center', va='bottom', fontsize=9)
+
+# Add within-group comparison lines (pre vs post) for each reward group
+line_y_base = 0.12
+
+for idx, (group, p_val) in enumerate(within_group_stats.items()):
+    # Format p-value text
+    if p_val < 0.001:
+        p_text = 'p<0.001'
+    elif p_val < 0.01:
+        p_text = f'p={p_val:.3f}'
+    else:
+        p_text = f'p={p_val:.2f}'
+
+    # Position: connect reorg_pre_day0 (x=0) to reorg_post_day0 (x=1)
+    y_offset = idx * 0.015
+    line_y = line_y_base + y_offset
+
+    # Draw horizontal line with brackets
+    x_pre, x_post = 0, 1
+    ax_day0_reorg.plot([x_pre, x_pre, x_post, x_post], [line_y - 0.003, line_y, line_y, line_y - 0.003],
+                       color='grey', linewidth=1)
+
+    # Add p-value text with group label
+    ax_day0_reorg.text((x_pre + x_post) / 2, line_y + 0.002, f'{group}: {p_text}',
+                       ha='center', va='bottom', fontsize=8)
+
+sns.despine()
+plt.tight_layout()
+
+# Save day 0 reorganization figure
+svg_file_day0_reorg = f'day0_reorg_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.svg'
+plt.savefig(os.path.join(output_dir, svg_file_day0_reorg), format='svg', dpi=300)
+plt.savefig(os.path.join(output_dir, svg_file_day0_reorg.replace('.svg', '.png')), format='png', dpi=300)
+
+# Save day 0 data
+day0_metrics_combined.to_csv(os.path.join(output_dir, f'day0_metrics_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.csv'), index=False)
+
+# Save day 0 statistical results (between-group)
+day0_stats_results = []
+for metric in ['within_day0', 'reorg_pre_day0', 'reorg_post_day0']:
+    r_plus = day0_metrics_rew[metric].dropna()
+    r_minus = day0_metrics_nonrew[metric].dropna()
+    stat, p_value = mannwhitneyu(r_plus, r_minus, alternative='two-sided')
+    day0_stats_results.append({
+        'comparison': 'between_groups',
+        'metric': metric,
+        'test': 'Mann-Whitney U',
+        'statistic': stat,
+        'p_value': p_value
+    })
+
+# Add within-group stats (pre vs post comparison)
+for group, df in [('R+', day0_metrics_rew), ('R-', day0_metrics_nonrew)]:
+    pre_vals = df['reorg_pre_day0'].dropna().values
+    post_vals = df['reorg_post_day0'].dropna().values
+    stat, p_value = wilcoxon(pre_vals, post_vals, alternative='two-sided')
+    day0_stats_results.append({
+        'comparison': f'within_{group}_pre_vs_post',
+        'metric': 'reorg_pre_day0 vs reorg_post_day0',
+        'test': 'Wilcoxon signed-rank',
+        'statistic': stat,
+        'p_value': p_value
+    })
+
+day0_stats_df = pd.DataFrame(day0_stats_results)
+day0_stats_df.to_csv(os.path.join(output_dir, f'day0_stats_{similarity_metric}_ctype_{projection_type}_{celltype_str}{zscore_str}.csv'), index=False)
 
 
 

@@ -4,25 +4,26 @@ Reactivation Surrogate Analysis for Data-Driven Threshold Determination
 
 This script computes statistically principled correlation thresholds for reactivation
 event detection via circular time-shift surrogate analysis. It generates per-mouse
-thresholds based on day 0, ensuring consistent event detection across all days.
+thresholds based on baseline days (-2 and -1), ensuring consistent event detection
+across all days.
 
 Approach:
-1. For each mouse, use day 0 to establish threshold
-2. Create whisker response template from day 0 mapping trials
-3. Load no-stim trial data from day 0
+1. For each mouse, use baseline days (-2 and -1) to establish threshold
+2. Create whisker response template from each baseline day's mapping trials
+3. Load no-stim trial data from baseline days and pool them
 4. Generate N surrogate datasets by circular time-shifting each cell independently
-5. Compute template correlation for each surrogate
+5. Compute template correlation for each surrogate (using pooled baseline template)
 6. Extract both percentile (pointwise threshold) and maximum (FWER) from each
 7. Average across surrogates to get final thresholds with confidence intervals
 8. This single threshold is then applied to all 5 days (−2, −1, 0, +1, +2)
 
 Output:
 - CSV file with one threshold per mouse (no day column)
-- Single-page PDFs showing day 0 surrogate distributions for each mouse
+- Single-page PDFs showing baseline surrogate distributions for each mouse
 - Summary plots comparing thresholds across mice and reward groups
 
 Note: Each day still uses its own template for correlation computation, but event
-detection uses the common day 0-derived threshold for consistency.
+detection uses the common baseline-derived threshold for consistency.
 """
 
 import os
@@ -59,9 +60,9 @@ n_map_trials = 40  # Number of mapping trials for template
 threshold_dff = 0.05  # 5% dF/F threshold for template cells (parametrized)
 
 # Surrogate parameters
-n_surrogates = 100  # Number of surrogate iterations
-min_shift_frames = 60  # Minimum shift: 2 seconds at 30Hz
-percentile_threshold = 99  # Percentile for pointwise threshold (e.g., 90, 95, 99)
+n_surrogates = 1000  # Number of surrogate iterations
+min_shift_frames = 0  # Minimum shift: 2 seconds at 30Hz
+percentile_threshold = 99.9  # Percentile for pointwise threshold (e.g., 90, 95, 99)
 np.random.seed(42)  # For reproducibility
 
 # Parallel processing
@@ -128,8 +129,8 @@ def create_surrogate_by_circular_shift(data, min_shift_frames=30):
     return surrogate
 
 
-def compute_surrogate_thresholds(data, template, n_surrogates=1000, min_shift=30,
-                                 percentile=95, verbose=True):
+def compute_surrogate_thresholds(data, template, n_surrogates=1000, min_shift=0,
+                                 percentile=99, verbose=True):
     """
     Compute surrogate-based thresholds via circular time shifts.
 
@@ -235,10 +236,11 @@ def compute_surrogate_thresholds(data, template, n_surrogates=1000, min_shift=30
 def analyze_mouse_surrogates(mouse, threshold_dff=0.05,
                              n_surrogates=1000, percentile=95, verbose=True):
     """
-    Compute surrogate thresholds for one mouse using day 0 data.
+    Compute surrogate thresholds for one mouse using baseline days (-2 and -1).
 
-    Data from day 0 is used to create a null distribution for threshold determination.
-    This threshold will be applied to all days to ensure consistent event detection.
+    Data from baseline days is pooled to create a null distribution for threshold
+    determination. This threshold will be applied to all days to ensure consistent
+    event detection.
 
     Parameters
     ----------
@@ -258,7 +260,7 @@ def analyze_mouse_surrogates(mouse, threshold_dff=0.05,
     results_df : pd.DataFrame
         Threshold results for this mouse (single row)
     all_surrogate_data : dict
-        Detailed surrogate distributions for day 0 (for plotting)
+        Detailed surrogate distributions for baseline (for plotting)
     """
     if verbose:
         print(f"\n{'='*60}")
@@ -268,24 +270,37 @@ def analyze_mouse_surrogates(mouse, threshold_dff=0.05,
     results_list = []
     all_surrogate_data = {}
 
-    reference_day = 0  # Use day 0 as reference
+    reference_days = [-2, -1]  # Use baseline days as reference
 
     try:
         if verbose:
-            print(f"\n  Processing day {reference_day}...")
+            print(f"\n  Processing baseline days {reference_days}...")
 
-        # Step 1: Create template from day 0
-        try:
-            template, cells_mask = create_whisker_template(mouse, reference_day, threshold_dff, verbose=False)
-            n_cells_responsive = cells_mask.sum()
+        # Step 1: Create templates from baseline days and average them
+        templates = []
+        cells_masks = []
+        for ref_day in reference_days:
+            try:
+                template, cells_mask = create_whisker_template(mouse, ref_day, threshold_dff, verbose=False)
+                templates.append(template)
+                cells_masks.append(cells_mask)
+                if verbose:
+                    print(f"    Day {ref_day}: {cells_mask.sum()} responsive cells")
+            except Exception as e:
+                if verbose:
+                    print(f"    Warning: Could not create template for day {ref_day}: {str(e)}")
+                continue
 
+        if len(templates) == 0:
             if verbose:
-                print(f"    Day {reference_day}: {n_cells_responsive} responsive cells")
-
-        except Exception as e:
-            if verbose:
-                print(f"    Error: Could not create template for day {reference_day}: {str(e)}")
+                print(f"    Error: Could not create template for any baseline day")
             return None, None
+
+        # Average templates from baseline days
+        template = np.mean(templates, axis=0)
+        # Union of responsive cells across baseline days
+        combined_mask = np.any(cells_masks, axis=0)
+        n_cells_responsive = combined_mask.sum()
 
         if n_cells_responsive < 3:
             if verbose:
@@ -294,38 +309,60 @@ def analyze_mouse_surrogates(mouse, threshold_dff=0.05,
 
         if verbose:
             if threshold_dff is not None:
-                print(f"    Template: {n_cells_responsive} cells above {threshold_dff*100}% threshold")
+                print(f"    Combined template: {n_cells_responsive} cells above {threshold_dff*100}% threshold")
             else:
-                print(f"    Template: using all {n_cells_responsive} cells")
+                print(f"    Combined template: using all {n_cells_responsive} cells")
 
-        # Step 2: Load no-stim trial data from day 0
+        # Step 2: Load no-stim trial data from baseline days and pool them
         folder = os.path.join(io.solve_common_paths('processed_data'), 'mice')
         file_name = 'tensor_xarray_learning_data.nc'
         xarray_learning = utils_imaging.load_mouse_xarray(mouse, folder, file_name, substracted=True)
 
-        # Select day 0 and no-stim trials
-        xarray_day = xarray_learning.sel(trial=xarray_learning['day'] == reference_day)
-        nostim_trials = xarray_day.sel(trial=xarray_day['no_stim'] == 1)
+        # Collect no-stim trials from both baseline days
+        all_nostim_data = []
+        total_trials = 0
+        n_timepoints = None
 
-        n_nostim_trials = len(nostim_trials.trial)
-        if n_nostim_trials < 5:
+        for ref_day in reference_days:
+            xarray_day = xarray_learning.sel(trial=xarray_learning['day'] == ref_day)
+            nostim_trials = xarray_day.sel(trial=xarray_day['no_stim'] == 1)
+
+            n_nostim_trials = len(nostim_trials.trial)
+            if n_nostim_trials < 1:
+                if verbose:
+                    print(f"    Warning: No no-stim trials on day {ref_day}")
+                continue
+
+            # Get data shape
+            n_cells, n_trials, n_tp = nostim_trials.shape
+            if n_timepoints is None:
+                n_timepoints = n_tp
+
+            # Reshape to 2D (concatenate trials)
+            day_data = nostim_trials.values.reshape(n_cells, -1)
+            day_data = np.nan_to_num(day_data, nan=0.0)
+            all_nostim_data.append(day_data)
+            total_trials += n_trials
+
             if verbose:
-                print(f"    Warning: Only {n_nostim_trials} no-stim trials on day {reference_day}")
+                print(f"    Day {ref_day}: {n_trials} no-stim trials × {n_tp} frames")
+
+        if len(all_nostim_data) == 0:
+            if verbose:
+                print(f"    Error: No valid no-stim data from baseline days")
             return None, None
 
-        # Reshape to 2D (concatenate trials)
-        n_cells, n_trials, n_timepoints = nostim_trials.shape
-        data = nostim_trials.values.reshape(n_cells, -1)
-        data = np.nan_to_num(data, nan=0.0)
+        # Pool data from baseline days
+        data = np.concatenate(all_nostim_data, axis=1)
         n_frames = data.shape[1]
 
         if n_frames < 60:  # Less than 2 seconds
             if verbose:
-                print(f"    Warning: Session too short ({n_frames} frames), skipping...")
+                print(f"    Warning: Pooled data too short ({n_frames} frames), skipping...")
             return None, None
 
         if verbose:
-            print(f"    Day {reference_day} data: {n_trials} trials × {n_timepoints} frames = {n_frames} total frames")
+            print(f"    Pooled baseline data: {total_trials} trials = {n_frames} total frames")
 
         # Step 3: Compute surrogate thresholds
         surrogate_results = compute_surrogate_thresholds(
@@ -336,7 +373,7 @@ def analyze_mouse_surrogates(mouse, threshold_dff=0.05,
         results_list.append({
             'mouse_id': mouse,
             'n_cells_responsive': n_cells_responsive,
-            'n_trials': n_trials,
+            'n_trials': total_trials,
             'n_timepoints': n_timepoints,
             'n_frames': n_frames,
             'n_surrogates': n_surrogates,
@@ -353,12 +390,12 @@ def analyze_mouse_surrogates(mouse, threshold_dff=0.05,
             'p_value_max': surrogate_results['p_value_max']
         })
 
-        # Store detailed data for plotting (use key 'day0' for consistency)
-        all_surrogate_data['day0'] = surrogate_results
+        # Store detailed data for plotting
+        all_surrogate_data['baseline'] = surrogate_results
 
     except Exception as e:
         if verbose:
-            print(f"    Error processing day {reference_day}: {str(e)}")
+            print(f"    Error processing baseline days: {str(e)}")
         import traceback
         traceback.print_exc()
         return None, None
@@ -371,7 +408,7 @@ def analyze_mouse_surrogates(mouse, threshold_dff=0.05,
     results_df = pd.DataFrame(results_list)
 
     if verbose:
-        print(f"\n  Completed mouse {mouse}: Day 0 threshold computed")
+        print(f"\n  Completed mouse {mouse}: Baseline threshold computed")
 
     return results_df, all_surrogate_data
 
@@ -393,14 +430,14 @@ def process_single_mouse(mouse, threshold_dff, n_surrogates, percentile=95, verb
 
 def plot_surrogate_distributions(mouse, surrogate_data, save_path):
     """
-    Generate single-page PDF showing surrogate distributions for day 0.
+    Generate single-page PDF showing surrogate distributions for baseline days.
 
     Parameters
     ----------
     mouse : str
         Mouse ID
     surrogate_data : dict
-        {key: surrogate_results} from analyze_mouse_surrogates (day 0)
+        {key: surrogate_results} from analyze_mouse_surrogates (baseline)
     save_path : str
         Path to save PDF
     """
@@ -408,12 +445,12 @@ def plot_surrogate_distributions(mouse, surrogate_data, save_path):
         print(f"    Warning: No surrogate data for {mouse}, skipping plot")
         return
 
-    # Get day 0 results
-    if 'day0' not in surrogate_data:
-        print(f"    Warning: No day 0 data for {mouse}, skipping plot")
+    # Get baseline results
+    if 'baseline' not in surrogate_data:
+        print(f"    Warning: No baseline data for {mouse}, skipping plot")
         return
 
-    results = surrogate_data['day0']
+    results = surrogate_data['baseline']
 
     with PdfPages(save_path) as pdf:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
@@ -479,8 +516,8 @@ def plot_surrogate_distributions(mouse, surrogate_data, save_path):
         ax2.legend(loc='upper left')
         ax2.grid(True, alpha=0.3, axis='y')
 
-        # Overall title - emphasize this is day 0 threshold applied to all days
-        fig.suptitle(f'{mouse} - Day 0 Surrogate Analysis (Applied to All Days)',
+        # Overall title - emphasize this is baseline threshold applied to all days
+        fig.suptitle(f'{mouse} - Baseline (Days -2, -1) Surrogate Analysis (Applied to All Days)',
                     fontsize=14, fontweight='bold')
         plt.tight_layout()
 
@@ -492,7 +529,7 @@ def plot_surrogate_distributions(mouse, surrogate_data, save_path):
 
 def plot_threshold_summary_across_mice(all_results_df, save_path):
     """
-    Summary plots comparing day 0 thresholds across mice.
+    Summary plots comparing baseline (days -2, -1) thresholds across mice.
 
     Parameters
     ----------
@@ -522,7 +559,7 @@ def plot_threshold_summary_across_mice(all_results_df, save_path):
                    label=f'{reward_group} (n={len(group_data)})')
         ax.set_xlabel(f'{percentile_val}th Percentile Threshold', fontweight='bold')
         ax.set_ylabel('Count', fontweight='bold')
-        ax.set_title(f'Day 0 {percentile_val}th Percentile Threshold Distribution', fontweight='bold')
+        ax.set_title(f'Baseline {percentile_val}th Percentile Threshold Distribution', fontweight='bold')
         ax.legend()
         ax.grid(True, alpha=0.3, axis='y')
 
@@ -542,7 +579,7 @@ def plot_threshold_summary_across_mice(all_results_df, save_path):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
         ax.set_ylabel(f'{percentile_val}th Percentile Threshold', fontweight='bold')
-        ax.set_title(f'Day 0 {percentile_val}th Percentile by Reward Group', fontweight='bold')
+        ax.set_title(f'Baseline {percentile_val}th Percentile by Reward Group', fontweight='bold')
         ax.grid(True, alpha=0.3, axis='y')
 
         # Max thresholds - histogram
@@ -554,7 +591,7 @@ def plot_threshold_summary_across_mice(all_results_df, save_path):
                    label=f'{reward_group} (n={len(group_data)})')
         ax.set_xlabel('Maximum Threshold (FWER)', fontweight='bold')
         ax.set_ylabel('Count', fontweight='bold')
-        ax.set_title('Day 0 Maximum (FWER) Threshold Distribution', fontweight='bold')
+        ax.set_title('Baseline Maximum (FWER) Threshold Distribution', fontweight='bold')
         ax.legend()
         ax.grid(True, alpha=0.3, axis='y')
 
@@ -574,10 +611,10 @@ def plot_threshold_summary_across_mice(all_results_df, save_path):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
         ax.set_ylabel('Maximum Threshold (FWER)', fontweight='bold')
-        ax.set_title('Day 0 Maximum (FWER) by Reward Group', fontweight='bold')
+        ax.set_title('Baseline Maximum (FWER) by Reward Group', fontweight='bold')
         ax.grid(True, alpha=0.3, axis='y')
 
-        fig.suptitle('Day 0 Threshold Summary (Applied to All Days)',
+        fig.suptitle('Baseline (Days -2, -1) Threshold Summary (Applied to All Days)',
                     fontsize=16, fontweight='bold', y=0.995)
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches='tight')
@@ -619,7 +656,7 @@ def plot_threshold_summary_across_mice(all_results_df, save_path):
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("REACTIVATION SURROGATE ANALYSIS - DAY 0 THRESHOLD")
+    print("REACTIVATION SURROGATE ANALYSIS - BASELINE THRESHOLD")
     print("="*60)
     print(f"\nParameters:")
     if threshold_dff is not None:
@@ -629,7 +666,7 @@ if __name__ == "__main__":
     print(f"  Number of surrogates: {n_surrogates}")
     print(f"  Percentile threshold: {percentile_threshold}th")
     print(f"  Minimum time shift: {min_shift_frames} frames ({min_shift_frames/sampling_rate:.1f} sec)")
-    print(f"  Reference day: Day 0 (applied to all days: {days})")
+    print(f"  Reference days: Days -2 and -1 (applied to all days: {days})")
     print(f"  Parallel jobs: {n_jobs}")
 
     # Create output directory
@@ -644,7 +681,7 @@ if __name__ == "__main__":
     print("="*60)
 
     all_mice_to_process = r_plus_mice + r_minus_mice
-    print(f"Processing {len(all_mice_to_process)} mice in parallel (day 0 only)...")
+    print(f"Processing {len(all_mice_to_process)} mice in parallel (baseline days -2, -1)...")
 
     results_list = Parallel(n_jobs=n_jobs, verbose=10)(
         delayed(process_single_mouse)(mouse, threshold_dff, n_surrogates,
@@ -666,7 +703,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     all_results_df = pd.concat(all_results, ignore_index=True)
-    print(f"\nCollected results: {len(all_results_df)} mice with day 0 thresholds")
+    print(f"\nCollected results: {len(all_results_df)} mice with baseline thresholds")
 
     # Save main results CSV
     csv_path = os.path.join(output_dir, 'surrogate_thresholds.csv')
@@ -721,8 +758,8 @@ if __name__ == "__main__":
     print(f"Total mice with thresholds: {len(all_results_df)}")
     print(f"Results saved to: {output_dir}")
     print(f"\nKey points:")
-    print(f"  - Each mouse has ONE threshold computed from day 0")
-    print(f"  - Template and data from day 0 only")
+    print(f"  - Each mouse has ONE threshold computed from baseline days (-2, -1)")
+    print(f"  - Template and data pooled from days -2 and -1")
     print(f"  - This threshold will be applied to ALL days (−2, −1, 0, +1, +2)")
     print(f"  - Ensures consistent event detection across days")
     print(f"\nNext steps:")
