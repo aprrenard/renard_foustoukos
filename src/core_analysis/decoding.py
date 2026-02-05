@@ -46,10 +46,10 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import correlate
 
 
-
-# ##################################################
-# Decoding before and after learning.
-# ##################################################
+    
+# ============================================================================
+# DECODING BEFORE AND AFTER LEARNING
+# ============================================================================
 
 
 sampling_rate = 30
@@ -146,8 +146,8 @@ for mouse in mice:
         mice_rew.append(mouse)
 
 
-# Decoding accuracy between reward groups.
-# ----------------------------------------
+# Decoding Accuracy Between Reward Groups
+# ----------------------------------------------------------------------------
 # Train a single classifier per mouse and plot average cross-validated accuracy.
 
 def per_mouse_cv_accuracy(vectors, label_encoder, seed=42, n_shuffles=100, return_weights=False, debug=False, n_jobs=20):
@@ -287,8 +287,8 @@ pd.DataFrame({'stat': [stat], 'p_value': [p_value]}).to_csv(os.path.join(output_
 
 
 
-# Relationship between classifier weights and learning modulation index.
-# ----------------------------------------------------------------------
+# Relationship Between Classifier Weights and Learning Modulation Index
+# ----------------------------------------------------------------------------
 
 lmi_df = os.path.join(io.processed_dir, f'lmi_results.csv')
 lmi_df = pd.read_csv(lmi_df)
@@ -386,16 +386,11 @@ output_dir = io.adjust_path_to_host(output_dir)
 plt.savefig(os.path.join(output_dir, 'classifier_weights_vs_lmi_by_group.svg'), format='svg', dpi=300)
 
 
-# Accuracy as a function of percent most modulated cells removed.
-# ---------------------------------------------------------------
-
-# This is to show that without the cells modulated on average, no information
+# Accuracy vs. Percent Most Modulated Cells Removed
+# ----------------------------------------------------------------------------
+# This analysis shows that without the cells modulated on average, no information
 # can be decoded. The non-modulated cells could still carry some information
 # similarly to non-place cells in the hippocampus.
-
-
-# Accuracy as a function of percent most modulated cells removed.
-# ---------------------------------------------------------------
 
 lmi_df = os.path.join(io.processed_dir, f'lmi_results.csv')
 lmi_df = pd.read_csv(lmi_df)
@@ -514,18 +509,186 @@ curve_df.to_csv(os.path.join(output_dir, 'accuracy_vs_percent_modulated_cells.cs
 
 
 
-# Decoding accuracy between pair of days.
-# ---------------------------------------
+# Pairwise Day Decoding - Pair-Specific Decoders
+# ----------------------------------------------------------------------------
+# For each pair of days, train a dedicated decoder to distinguish them.
+# This is more straightforward than the fixed decoder approach below.
 
+all_days = [-2, -1, 0, 1, 2]
+day_labels = [str(d) for d in all_days]
+
+def pairwise_day_decoding_cv(vectors, days, seed=42, n_splits=10):
+    """
+    Train a separate decoder for each pair of days.
+
+    For each pair (day_i, day_j):
+    - Train classifier to distinguish day_i vs day_j
+    - Use n_splits-fold cross-validation
+    - Return accuracy matrix (n_mice × n_days × n_days)
+    """
+    acc_matrices = []
+    rng = np.random.default_rng(seed)
+
+    for d in vectors:
+        acc_matrix = np.full((len(days), len(days)), np.nan)
+        day_per_trial = d['day'].values
+
+        # Get indices for each day
+        day_indices = {day: np.where(day_per_trial == day)[0] for day in days}
+
+        # For each pair of days
+        for i, day_i in enumerate(days):
+            for j, day_j in enumerate(days):
+                if i == j:
+                    # Same day: accuracy ~0.5 (random)
+                    acc_matrix[i, j] = 0.5
+                    continue
+
+                idx_i = day_indices[day_i]
+                idx_j = day_indices[day_j]
+
+                if len(idx_i) < n_splits or len(idx_j) < n_splits:
+                    continue  # Not enough trials
+
+                # Cross-validation
+                fold_accs = []
+
+                for k in range(n_splits):
+                    # Split day_i trials
+                    idx_i_shuff = rng.permutation(idx_i)
+                    fold_size_i = len(idx_i) // n_splits
+                    test_i = idx_i_shuff[k*fold_size_i:(k+1)*fold_size_i] if k < n_splits-1 else idx_i_shuff[k*fold_size_i:]
+                    train_i = np.setdiff1d(idx_i, test_i)
+
+                    # Split day_j trials
+                    idx_j_shuff = rng.permutation(idx_j)
+                    fold_size_j = len(idx_j) // n_splits
+                    test_j = idx_j_shuff[k*fold_size_j:(k+1)*fold_size_j] if k < n_splits-1 else idx_j_shuff[k*fold_size_j:]
+                    train_j = np.setdiff1d(idx_j, test_j)
+
+                    if len(train_i) < 1 or len(train_j) < 1 or len(test_i) < 1 or len(test_j) < 1:
+                        continue
+
+                    # Prepare training data
+                    X_train = np.concatenate([
+                        d.values[:, train_i].T,
+                        d.values[:, train_j].T
+                    ], axis=0)
+                    y_train = np.array([0] * len(train_i) + [1] * len(train_j))
+
+                    # Prepare test data
+                    X_test = np.concatenate([
+                        d.values[:, test_i].T,
+                        d.values[:, test_j].T
+                    ], axis=0)
+                    y_test = np.array([0] * len(test_i) + [1] * len(test_j))
+
+                    # Train and test
+                    scaler = StandardScaler()
+                    X_train_proc = scaler.fit_transform(X_train)
+                    X_test_proc = scaler.transform(X_test)
+
+                    clf = LogisticRegression(max_iter=5000, random_state=seed)
+                    clf.fit(X_train_proc, y_train)
+                    y_pred = clf.predict(X_test_proc)
+
+                    acc = np.mean(y_pred == y_test)
+                    fold_accs.append(acc)
+
+                # Average over folds
+                if len(fold_accs) > 0:
+                    acc_matrix[i, j] = np.mean(fold_accs)
+
+        acc_matrices.append(acc_matrix)
+
+    return np.array(acc_matrices)
+
+# Compute accuracy matrices for each group
+print("\nComputing pairwise day decoding with pair-specific decoders...")
+accs_rew_pairwise = pairwise_day_decoding_cv(vectors_rew, all_days)
+accs_nonrew_pairwise = pairwise_day_decoding_cv(vectors_nonrew, all_days)
+
+# Average across mice
+mean_accs_rew_pairwise = np.nanmean(accs_rew_pairwise, axis=0)
+mean_accs_nonrew_pairwise = np.nanmean(accs_nonrew_pairwise, axis=0)
+
+# Make matrices symmetric
+def make_symmetric_with_diag(mat):
+    sym_mat = np.full_like(mat, np.nan)
+    iu = np.triu_indices_from(mat, k=1)
+    sym_mat[iu] = mat[iu]
+    il = np.tril_indices_from(mat, k=-1)
+    sym_mat[il] = mat.T[il]
+    diag = np.diag_indices_from(mat)
+    sym_mat[diag] = np.diag(mat)
+    return sym_mat
+
+mean_accs_rew_pairwise_sym = make_symmetric_with_diag(mean_accs_rew_pairwise)
+mean_accs_nonrew_pairwise_sym = make_symmetric_with_diag(mean_accs_nonrew_pairwise)
+
+# Plot accuracy matrices
+import matplotlib.gridspec as gridspec
+
+fig = plt.figure(figsize=(9, 4))
+gs = gridspec.GridSpec(1, 3, width_ratios=[1, 1, 0.05])
+ax0 = fig.add_subplot(gs[0])
+ax1 = fig.add_subplot(gs[1])
+ax2 = fig.add_subplot(gs[2])
+vmax = max(np.nanmax(mean_accs_rew_pairwise_sym), np.nanmax(mean_accs_nonrew_pairwise_sym))
+vmin = 0.5
+
+sns.heatmap(mean_accs_rew_pairwise_sym, annot=True, fmt=".2f",
+            xticklabels=day_labels, yticklabels=day_labels,
+            ax=ax0, cmap="viridis", vmin=vmin, vmax=vmax,
+            mask=np.isnan(mean_accs_rew_pairwise_sym), cbar=False)
+ax0.set_title("R+ group: Pairwise day decoding accuracy (CV)")
+ax0.set_xlabel("Day")
+ax0.set_ylabel("Day")
+
+sns.heatmap(mean_accs_nonrew_pairwise_sym, annot=True, fmt=".2f",
+            xticklabels=day_labels, yticklabels=day_labels,
+            ax=ax1, cmap="viridis", vmin=vmin, vmax=vmax,
+            mask=np.isnan(mean_accs_nonrew_pairwise_sym), cbar=False)
+ax1.set_title("R- group: Pairwise day decoding accuracy (CV)")
+ax1.set_xlabel("Day")
+ax1.set_ylabel("Day")
+
+# Shared colorbar
+norm = colors.Normalize(vmin=vmin, vmax=vmax)
+sm = plt.cm.ScalarMappable(cmap="viridis", norm=norm)
+sm.set_array([])
+fig.colorbar(sm, cax=ax2)
+
+plt.tight_layout()
+sns.despine()
+
+# Save figure
+output_dir = '/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/decoding'
+output_dir = io.adjust_path_to_host(output_dir)
+plt.savefig(os.path.join(output_dir, 'pairwise_day_decoding_accuracy_matrix.svg'),
+            format='svg', dpi=300)
+plt.savefig(os.path.join(output_dir, 'pairwise_day_decoding_accuracy_matrix.png'),
+            format='png', dpi=300)
+
+# Save data
+np.save(os.path.join(output_dir, 'pairwise_day_decoding_accuracy_matrix_Rplus.npy'),
+        mean_accs_rew_pairwise)
+np.save(os.path.join(output_dir, 'pairwise_day_decoding_accuracy_matrix_Rminus.npy'),
+        mean_accs_nonrew_pairwise)
+
+print("Pairwise day decoding with pair-specific decoders complete.")
+print(f"R+ mean accuracy range: {np.nanmin(mean_accs_rew_pairwise):.3f} - {np.nanmax(mean_accs_rew_pairwise):.3f}")
+print(f"R- mean accuracy range: {np.nanmin(mean_accs_nonrew_pairwise):.3f} - {np.nanmax(mean_accs_nonrew_pairwise):.3f}")
+
+
+# Pairwise Day Decoding - Fixed Decoder
+# ----------------------------------------------------------------------------
 # The rationale is to use a classifier trained on pre vs post, excluding day 0,
 # to assess whether activity after day 0 learning already resembles post-learning activity.
-
+#
 # For each mouse, train a classifier to distinguish activity patterns on day -2, -1 vs +1, +2.
 # Then, use this trained classifier to decode every pair of days (including each day against itself).
 # Plot accuracy as a matrix for each reward group.
- 
-all_days = [-2, -1, 0, 1, 2]
-day_labels = [str(d) for d in all_days]
 
 def pairwise_day_decoding_fixed_decoder_cv(vectors, days, seed=42, n_splits=10):
     # Returns: list of accuracy matrices (n_mice x n_days x n_days)
@@ -596,16 +759,6 @@ mean_accs_rew = np.nanmean(accs_rew_matrix, axis=0)
 mean_accs_nonrew = np.nanmean(accs_nonrew_matrix, axis=0)
 
 # Make matrices symmetric with filled diagonal for aesthetics
-def make_symmetric_with_diag(mat):
-    sym_mat = np.full_like(mat, np.nan)
-    iu = np.triu_indices_from(mat, k=1)
-    sym_mat[iu] = mat[iu]
-    il = np.tril_indices_from(mat, k=-1)
-    sym_mat[il] = mat.T[il]
-    diag = np.diag_indices_from(mat)
-    sym_mat[diag] = np.diag(mat)
-    return sym_mat
-
 mean_accs_rew_sym = make_symmetric_with_diag(mean_accs_rew)
 mean_accs_nonrew_sym = make_symmetric_with_diag(mean_accs_nonrew)
 
@@ -652,10 +805,8 @@ np.save(os.path.join(output_dir, 'pairwise_day_decoding_fixed_decoder_accuracy_m
 np.save(os.path.join(output_dir, 'pairwise_day_decoding_fixed_decoder_accuracy_matrix_Rminus.npy'), mean_accs_nonrew)
 
 
-# ---------------------------------------------------------------
-# Quantification: Does Day 0 look more like pre or post?
-# ---------------------------------------------------------------
-
+# Quantification: Does Day 0 Look More Like Pre or Post?
+# ----------------------------------------------------------------------------
 # For each mouse, compare decoding accuracy for:
 #  - Day -2/-1 vs Day 0 (pre vs day0)
 #  - Day 0 vs Day +1/+2 (day0 vs post)
@@ -687,6 +838,7 @@ acc_pre_vs_day0_nonrew, acc_day0_vs_post_nonrew = extract_pairwise_decoding_accu
 # Bar plot: R+ and R- groups, pre vs day0 and day0 vs post
 fig, axes = plt.subplots(1, 2, figsize=(6, 4), sharey=True)
 
+stats_vs_chance = []
 for ax, group, acc_pre, acc_post, color in zip(
     axes,
     ['R+', 'R-'],
@@ -703,8 +855,24 @@ for ax, group, acc_pre, acc_post, color in zip(
     ax.set_title(f'{group} group')
     ax.set_ylim(0, 1.0)
     ax.axhline(0.5, color='grey', linestyle='--', alpha=0.5)
+
+    # Test pre vs post (paired comparison)
     stat, pval = wilcoxon(acc_pre, acc_post, alternative='two-sided')
-    ax.text(0.5, 0.95, f'Wilcoxon p={pval:.3f}', ha='center', va='top', transform=ax.transAxes, fontsize=10)
+    ax.text(0.5, 0.95, f'pre vs post: p={pval:.3f}', ha='center', va='top', transform=ax.transAxes, fontsize=9)
+
+    # Test each condition against chance (0.5)
+    _, pval_pre_vs_chance = wilcoxon(acc_pre - 0.5, alternative='two-sided')
+    _, pval_post_vs_chance = wilcoxon(acc_post - 0.5, alternative='two-sided')
+
+    # Display p-values vs chance above each bar
+    ax.text(0, 0.85, f'vs 0.5: p={pval_pre_vs_chance:.3f}', ha='center', va='bottom', fontsize=8, transform=ax.get_xaxis_transform())
+    ax.text(1, 0.85, f'vs 0.5: p={pval_post_vs_chance:.3f}', ha='center', va='bottom', fontsize=8, transform=ax.get_xaxis_transform())
+
+    # Collect stats
+    stats_vs_chance.append({'group': group, 'comparison': 'pre_vs_day0', 'p_vs_chance': pval_pre_vs_chance})
+    stats_vs_chance.append({'group': group, 'comparison': 'day0_vs_post', 'p_vs_chance': pval_post_vs_chance})
+    stats_vs_chance.append({'group': group, 'comparison': 'pre_vs_post', 'p_paired': pval})
+
     ax.set_ylabel('Decoding accuracy (CV)')
     ax.set_xlabel('')
 
@@ -728,6 +896,9 @@ df_quant = pd.DataFrame({
 })
 df_quant.to_csv(os.path.join(output_dir, 'day0_pre_vs_post_decoding_accuracy_quantification.csv'), index=False)
 
+# Save stats (vs chance and paired comparisons)
+df_stats = pd.DataFrame(stats_vs_chance)
+df_stats.to_csv(os.path.join(output_dir, 'day0_pre_vs_post_decoding_accuracy_stats.csv'), index=False)
 
 
 
@@ -746,10 +917,10 @@ df_quant.to_csv(os.path.join(output_dir, 'day0_pre_vs_post_decoding_accuracy_qua
 
 
 
-# ############################################
-# Decoding decision value across learning during Day 0.
-# #############################################
 
+# ============================================================================
+# DECODING DECISION VALUE ACROSS LEARNING DURING DAY 0
+# ============================================================================
 # The idea is to see if decoding accuracy improves progressively during Day 0 learning trials,
 # indicating progressive learning, or if it jumps suddenly at some point,
 # indicating an inflexion point, or if it remains flat.
@@ -1316,8 +1487,8 @@ print("\n" + "="*80)
 print("SINGLE MOUSE PROGRESSIVE LEARNING ANALYSIS")
 print("="*80 + "\n")
 
-# 1. Individual mouse plots in a multi-page PDF
-# ----------------------------------------------
+# Individual Mouse Plots in Multi-Page PDF
+# ----------------------------------------------------------------------------
 
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -1359,8 +1530,8 @@ with PdfPages(pdf_file) as pdf:
 print(f"Individual mouse plots saved to: {pdf_file}")
 
 
-# 2. Statistical Quantification of Progressive Learning
-# ------------------------------------------------------
+# Statistical Quantification of Progressive Learning
+# ----------------------------------------------------------------------------
 
 print("\n" + "-"*80)
 print("STATISTICAL TESTS FOR PROGRESSIVE LEARNING EFFECT")
@@ -1446,8 +1617,8 @@ df_slopes.to_csv(os.path.join(output_dir, 'progressive_learning_slopes.csv'), in
 print(f"Saved: progressive_learning_slopes.csv")
 
 
-# Compute and save population-level statistics
-# ---------------------------------------------
+# Compute and Save Population-Level Statistics
+# ----------------------------------------------------------------------------
 
 population_stats = []
 
@@ -1479,8 +1650,8 @@ df_population_stats.to_csv(os.path.join(output_dir, 'progressive_learning_popula
 print(f"Saved: progressive_learning_population_statistics.csv")
 
 
-# Population-level statistics visualization
-# ------------------------------------------
+# Population-Level Statistics Visualization
+# ----------------------------------------------------------------------------
 
 fig, ax = plt.subplots(1, 1, figsize=(6, 5))
 
@@ -1544,8 +1715,8 @@ plt.savefig(os.path.join(output_dir, 'progressive_learning_population_statistics
 print(f"Saved: progressive_learning_population_statistics figure")
 
 
-# Summary visualization of individual mice
-# -----------------------------------------
+# Summary Visualization of Individual Mice
+# ----------------------------------------------------------------------------
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -1866,9 +2037,9 @@ print("="*80 + "\n")
 
 
  
-# ############################################################################
-# Illustration of the result for two example mice.
-# ############################################################################
+# ============================================================================
+# ILLUSTRATION OF RESULTS FOR TWO EXAMPLE MICE
+# ============================================================================
 # Find the R+ and R- mouse with highest correlation between behavior and decision value
 best_rplus = df_corr[df_corr['reward_group'] == 'R+'].sort_values('correlation', ascending=False).iloc[0]['mouse_id']
 best_rminus = df_corr[df_corr['reward_group'] == 'R-'].sort_values('correlation', ascending=False).iloc[1]['mouse_id']
@@ -1949,7 +2120,7 @@ output_dir = '/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/d
 
 
 # Analysis: Error-Driven Learning Signals
-# ========================================
+# ----------------------------------------------------------------------------
 
 print("\n" + "="*80)
 print("ERROR-DRIVEN LEARNING SIGNALS ANALYSIS")
@@ -1958,8 +2129,8 @@ print("="*80 + "\n")
 # Parameters
 trial_history_depth = 1  # Look at previous trial only
 
-# Part 1: Decision value adjustments after different trial types
-# ----------------------------------------------------------------
+# Part 1: Decision Value Adjustments After Different Trial Types
+# ----------------------------------------------------------------------------
 print("Part 1: Analyzing decision value adjustments after all trial types...\n")
 
 error_driven_data = []
@@ -2166,8 +2337,8 @@ df_error_stats.to_csv(os.path.join(output_dir, 'error_driven_analysis_stats.csv'
 print("\nSaved: error_driven_analysis_stats.csv")
 
 
-# Part 2: Behavioral performance after different trial types
-# -----------------------------------------------------------
+# Part 2: Behavioral Performance After Different Trial Types
+# ----------------------------------------------------------------------------
 print("\n" + "-"*80)
 print("Part 2: Analyzing behavioral performance after different trial types...\n")
 

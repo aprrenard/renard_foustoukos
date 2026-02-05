@@ -19,7 +19,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
-from scipy.stats import chi2, mannwhitneyu, kruskal
+from scipy.stats import chi2, mannwhitneyu, kruskal, wilcoxon
 from scipy.optimize import curve_fit
 from scipy.special import expit
 from joblib import Parallel, delayed
@@ -48,7 +48,7 @@ MIN_TRIALS = 20  # Minimum whisker trials required for fitting
 ALPHA = 0.05  # Significance threshold
 N_CORES = 35  # Number of cores for parallel processing (one per mouse)
 DAYS_LEARNING = [-2, -1, 0, 1, 2]  # Days for mapping PSTH visualization
-USE_SIGMOID_FILTER = False  # Use sigmoid vs linear filter (True) or all LMI cells (False)
+USE_SIGMOID_FILTER = 'vs_flat'  # 'vs_linear', 'vs_flat', or 'none' (all cells with valid sigmoid fit)
 
 # LMI thresholds for cell selection
 LMI_POSITIVE_THRESHOLD = 0.975  # Top 2.5% LMI cells
@@ -60,9 +60,14 @@ OUTPUT_DIR = io.adjust_path_to_host(
 )
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Reactivation output directory (participation rates saved by reactivation_lmi_prediction.py)
+REACTIVATION_OUTPUT_DIR = io.adjust_path_to_host(
+    '/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/reactivation_lmi'
+)
+
 
 # =============================================================================
-# DATA LOADINGa
+# DATA LOADING
 # =============================================================================
 
 def load_day0_data(mouse_id, response_type='mean', response_win=(0, 0.300)):
@@ -569,7 +574,7 @@ def process_mouse(mouse_id, response_type='mean', response_win=(0, 0.300),
 # PRE/POST INFLECTION ANALYSIS
 # =============================================================================
 
-def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, min_trials_per_period, psth_win=(-0.5, 1.5)):
+def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, min_trials_per_period, psth_win=(-0.5, 1.5), group_column='lmi_sign'):
     """
     Process all cells from a single mouse for pre/post inflection analysis.
 
@@ -578,13 +583,15 @@ def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, mi
     mouse_id : str
         Mouse identifier
     mouse_cells_df : pd.DataFrame
-        Dataframe with cells from this mouse (columns: roi, lmi_sign, reward_group, inflection)
+        Dataframe with cells from this mouse (columns: roi, group_column, reward_group, inflection)
     response_win : tuple
         Time window for quantifying responses (start, end) in seconds
     min_trials_per_period : int
         Minimum number of trials required in each period
     psth_win : tuple
         Time window for PSTH traces (start, end) in seconds
+    group_column : str
+        Name of the column to use for grouping (default: 'lmi_sign')
 
     Returns
     -------
@@ -620,7 +627,7 @@ def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, mi
         # Process each cell from this mouse
         for _, row in mouse_cells_df.iterrows():
             roi = row['roi']
-            lmi_sign = row['lmi_sign']
+            group_value = row[group_column]
             reward_group = row['reward_group']
             inflection_trial = row['inflection']
 
@@ -646,7 +653,16 @@ def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, mi
                 trials_before = xarr_cell.isel(trial=before_mask)
                 trials_after = xarr_cell.isel(trial=after_mask)
 
-                # PERFORMANCE: Average trials BEFORE converting to dataframe
+                # Per-trial baseline subtraction on the pre-stimulus window.
+                # Stronger responses post-inflection come with higher baseline
+                # variance; subtracting each trial's own pre-stim mean removes
+                # this before averaging.
+                baseline_before = trials_before.sel(time=slice(psth_win[0], 0)).mean(dim='time')
+                trials_before = trials_before - baseline_before
+                baseline_after = trials_after.sel(time=slice(psth_win[0], 0)).mean(dim='time')
+                trials_after = trials_after - baseline_after
+
+                # Average trials BEFORE converting to dataframe
                 # This reduces data from (n_trials × n_timepoints) to just (n_timepoints)
                 mean_before = trials_before.mean(dim='trial') * 100  # Convert to %ΔF/F
                 mean_after = trials_after.mean(dim='trial') * 100
@@ -656,14 +672,14 @@ def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, mi
                 df_before['period'] = 'pre'
                 df_before['mouse_id'] = mouse_id
                 df_before['roi'] = roi
-                df_before['lmi_sign'] = lmi_sign
+                df_before[group_column] = group_value
                 df_before['reward_group'] = reward_group
 
                 df_after = mean_after.to_dataframe(name='psth').reset_index()
                 df_after['period'] = 'post'
                 df_after['mouse_id'] = mouse_id
                 df_after['roi'] = roi
-                df_after['lmi_sign'] = lmi_sign
+                df_after[group_column] = group_value
                 df_after['reward_group'] = reward_group
 
                 # Combine pre and post
@@ -678,7 +694,7 @@ def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, mi
                 response_list.append({
                     'mouse_id': mouse_id,
                     'roi': roi,
-                    'lmi_sign': lmi_sign,
+                    group_column: group_value,
                     'reward_group': reward_group,
                     'response': np.mean(before_response_win) * 100,  # Convert to %ΔF/F
                     'period': 'pre',
@@ -688,7 +704,7 @@ def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, mi
                 response_list.append({
                     'mouse_id': mouse_id,
                     'roi': roi,
-                    'lmi_sign': lmi_sign,
+                    group_column: group_value,
                     'reward_group': reward_group,
                     'response': np.mean(after_response_win) * 100,
                     'period': 'post',
@@ -709,7 +725,7 @@ def process_mouse_pre_post_inflection(mouse_id, mouse_cells_df, response_win, mi
     return psth_list, response_list, n_processed, n_skipped
 
 
-def compute_pre_post_inflection_psth(results_df, response_win=(0, 0.300), min_trials_per_period=3, psth_win=(-0.5, 1.5), n_jobs=1):
+def compute_pre_post_inflection_psth(results_df, response_win=(0, 0.300), min_trials_per_period=3, psth_win=(-0.5, 1.5), n_jobs=1, group_column='lmi_sign'):
     """
     Compute average PSTH and response before and after inflection point for each cell.
 
@@ -719,7 +735,7 @@ def compute_pre_post_inflection_psth(results_df, response_win=(0, 0.300), min_tr
     Parameters
     ----------
     results_df : pd.DataFrame
-        Results dataframe with columns: mouse_id, roi, lmi_sign, reward_group, inflection
+        Results dataframe with columns: mouse_id, roi, group_column, reward_group, inflection
     response_win : tuple
         Time window for quantifying responses (start, end) in seconds
     min_trials_per_period : int
@@ -729,13 +745,15 @@ def compute_pre_post_inflection_psth(results_df, response_win=(0, 0.300), min_tr
     n_jobs : int
         Number of parallel jobs (default: 1 = no parallelization)
         Set to -1 to use all available cores
+    group_column : str
+        Name of the column to use for grouping (default: 'lmi_sign')
 
     Returns
     -------
     psth_df : pd.DataFrame
-        PSTH data with columns: mouse_id, roi, lmi_sign, reward_group, time, psth, period
+        PSTH data with columns: mouse_id, roi, group_column, reward_group, time, psth, period
     response_df : pd.DataFrame
-        Quantified responses with columns: mouse_id, roi, lmi_sign, reward_group, response, period
+        Quantified responses with columns: mouse_id, roi, group_column, reward_group, response, period
     """
     print("\n" + "="*70)
     print("COMPUTING PRE/POST INFLECTION PSTH")
@@ -756,7 +774,7 @@ def compute_pre_post_inflection_psth(results_df, response_win=(0, 0.300), min_tr
         for idx, (mouse_id, mouse_cells) in enumerate(grouped):
             print(f"  Processing mouse {idx+1}/{n_mice}: {mouse_id} ({len(mouse_cells)} cells)...")
             result = process_mouse_pre_post_inflection(
-                mouse_id, mouse_cells, response_win, min_trials_per_period, psth_win
+                mouse_id, mouse_cells, response_win, min_trials_per_period, psth_win, group_column
             )
             all_results.append(result)
     else:
@@ -764,7 +782,7 @@ def compute_pre_post_inflection_psth(results_df, response_win=(0, 0.300), min_tr
         print(f"  Running parallel processing across {n_mice} mice...")
         all_results = Parallel(n_jobs=n_jobs, verbose=5)(
             delayed(process_mouse_pre_post_inflection)(
-                mouse_id, mouse_cells, response_win, min_trials_per_period, psth_win
+                mouse_id, mouse_cells, response_win, min_trials_per_period, psth_win, group_column
             )
             for mouse_id, mouse_cells in grouped
         )
@@ -794,9 +812,9 @@ def compute_pre_post_inflection_psth(results_df, response_win=(0, 0.300), min_tr
 
         # Print summary statistics
         print("\nCell counts by group:")
-        summary = response_df.groupby(['reward_group', 'lmi_sign', 'period'])['roi'].nunique().reset_index()
-        summary.columns = ['reward_group', 'lmi_sign', 'period', 'n_cells']
-        print(summary.pivot_table(index=['reward_group', 'lmi_sign'], columns='period', values='n_cells'))
+        summary = response_df.groupby(['reward_group', group_column, 'period'])['roi'].nunique().reset_index()
+        summary.columns = ['reward_group', group_column, 'period', 'n_cells']
+        print(summary.pivot_table(index=['reward_group', group_column], columns='period', values='n_cells'))
 
     return psth_df, response_df
 
@@ -805,12 +823,12 @@ def compute_pre_post_inflection_psth(results_df, response_win=(0, 0.300), min_tr
 # VISUALIZATION FUNCTIONS
 # =============================================================================
 
-def plot_pre_post_inflection_psth_and_responses(psth_df, response_df, output_dir, stat_level='cells'):
+def plot_pre_post_inflection_psth_and_responses(psth_df, response_df, output_dir, stat_level='cells', group_column='lmi_sign', group_values=['Positive', 'Negative'], filename_suffix=''):
     """
     Plot PSTHs and response quantification for pre vs post inflection periods.
 
     Creates a 4x2 grid figure:
-    - 4 rows: R+/LMI+, R+/LMI-, R-/LMI+, R-/LMI-
+    - 4 rows: R+/group1, R+/group2, R-/group1, R-/group2
     - 2 columns: PSTH (left), response barplot (right)
 
     Statistical testing: Wilcoxon signed-rank test comparing pre vs post within each group.
@@ -818,14 +836,20 @@ def plot_pre_post_inflection_psth_and_responses(psth_df, response_df, output_dir
     Parameters
     ----------
     psth_df : pd.DataFrame
-        PSTH data with columns: mouse_id, roi, lmi_sign, reward_group, time, psth, period
+        PSTH data with columns: mouse_id, roi, group_column, reward_group, time, psth, period
     response_df : pd.DataFrame
-        Response data with columns: mouse_id, roi, lmi_sign, reward_group, response, period
+        Response data with columns: mouse_id, roi, group_column, reward_group, response, period
     output_dir : str
         Output directory for saving figure
     stat_level : str
         'cells' = stats over individual cells (default)
         'mice' = aggregate cells per mouse first, then stats over mice
+    group_column : str
+        Name of the column to use for grouping (default: 'lmi_sign')
+    group_values : list
+        Values of the group column to plot (default: ['Positive', 'Negative'])
+    filename_suffix : str
+        Suffix to add to filename for differentiation (default: '')
     """
     print("\n" + "="*70)
     print(f"PLOTTING PRE/POST INFLECTION PSTH AND RESPONSES (stat_level={stat_level})")
@@ -840,10 +864,10 @@ def plot_pre_post_inflection_psth_and_responses(psth_df, response_df, output_dir
         print("  Aggregating cells per mouse before plotting/statistics...")
 
         # For PSTH: average across cells within each mouse
-        psth_df = psth_df.groupby(['mouse_id', 'lmi_sign', 'reward_group', 'time', 'period'])['psth'].mean().reset_index()
+        psth_df = psth_df.groupby(['mouse_id', group_column, 'reward_group', 'time', 'period'])['psth'].mean().reset_index()
 
         # For responses: average across cells within each mouse
-        response_df = response_df.groupby(['mouse_id', 'lmi_sign', 'reward_group', 'period'])['response'].mean().reset_index()
+        response_df = response_df.groupby(['mouse_id', group_column, 'reward_group', 'period'])['response'].mean().reset_index()
 
         # Use 'mouse_id' as the identifier for pairing
         id_col = 'mouse_id'
@@ -863,25 +887,25 @@ def plot_pre_post_inflection_psth_and_responses(psth_df, response_df, output_dir
         'R-': '#c959affe'  # Magenta
     }
 
-    # Define row order: R+/LMI+, R+/LMI-, R-/LMI+, R-/LMI-
+    # Define row order using provided group_values
     row_configs = [
-        ('R+', 'Positive', 'R+/LMI+'),
-        ('R+', 'Negative', 'R+/LMI-'),
-        ('R-', 'Positive', 'R-/LMI+'),
-        ('R-', 'Negative', 'R-/LMI-')
+        ('R+', group_values[0], f'R+/{group_values[0]}'),
+        ('R+', group_values[1], f'R+/{group_values[1]}'),
+        ('R-', group_values[0], f'R-/{group_values[0]}'),
+        ('R-', group_values[1], f'R-/{group_values[1]}')
     ]
 
     # Process each row
-    for row_idx, (reward_group, lmi_sign, label) in enumerate(row_configs):
+    for row_idx, (reward_group, group_value, label) in enumerate(row_configs):
         # Filter data for this group
         psth_group = psth_df[
             (psth_df['reward_group'] == reward_group) &
-            (psth_df['lmi_sign'] == lmi_sign)
+            (psth_df[group_column] == group_value)
         ]
 
         response_group = response_df[
             (response_df['reward_group'] == reward_group) &
-            (response_df['lmi_sign'] == lmi_sign)
+            (response_df[group_column] == group_value)
         ]
 
         # Count data points (cells or mice depending on stat_level)
@@ -986,13 +1010,1210 @@ def plot_pre_post_inflection_psth_and_responses(psth_df, response_df, output_dir
 
     plt.tight_layout()
 
-    # Save figure with stat_level in filename
-    filename = f'pre_post_inflection_psth_and_responses_{stat_level}.svg'
+    # Save figure with stat_level and optional suffix in filename
+    if filename_suffix:
+        filename = f'pre_post_inflection_psth_and_responses_{stat_level}_{filename_suffix}.svg'
+    else:
+        filename = f'pre_post_inflection_psth_and_responses_{stat_level}.svg'
     save_path = os.path.join(output_dir, filename)
     plt.savefig(save_path, format='svg', dpi=150, bbox_inches='tight')
     plt.close()
 
     print(f"\n  ✓ Figure saved to: {save_path}")
+
+
+def plot_lmi_distribution_in_plasticity_groups(potentiation, depression, output_dir):
+    """
+    Plot distribution of LMI categories within plasticity groups.
+
+    For each plasticity group (potentiation/depression) and reward group (R+/R-),
+    shows proportion of cells that are LMI+, LMI-, or non-significant LMI.
+
+    Parameters
+    ----------
+    potentiation : pd.DataFrame
+        Potentiation cells with columns: mouse_id, roi, reward_group, lmi_p
+    depression : pd.DataFrame
+        Depression cells with columns: mouse_id, roi, reward_group, lmi_p
+    output_dir : str
+        Output directory for saving figure
+    """
+    print("\nPlotting LMI distribution within plasticity groups...")
+
+    LMI_POS_THRESH = 0.975
+    LMI_NEG_THRESH = 0.025
+
+    def categorize_lmi(lmi_p):
+        """Categorize cells by LMI percentile."""
+        if lmi_p >= LMI_POS_THRESH:
+            return 'LMI+'
+        elif lmi_p <= LMI_NEG_THRESH:
+            return 'LMI-'
+        else:
+            return 'Non-sig LMI'
+
+    # Categorize cells
+    potentiation = potentiation.copy()
+    depression = depression.copy()
+    potentiation['lmi_category'] = potentiation['lmi_p'].apply(categorize_lmi)
+    depression['lmi_category'] = depression['lmi_p'].apply(categorize_lmi)
+
+    def compute_proportions(df, reward_group):
+        """Compute proportions of each LMI category per mouse."""
+        group_df = df[df['reward_group'] == reward_group]
+        results = []
+        for mouse in group_df['mouse_id'].unique():
+            mouse_df = group_df[group_df['mouse_id'] == mouse]
+            counts = mouse_df['lmi_category'].value_counts()
+            total = len(mouse_df)
+            if total > 0:
+                results.append({
+                    'mouse_id': mouse,
+                    'reward_group': reward_group,
+                    'LMI+': counts.get('LMI+', 0) / total,
+                    'LMI-': counts.get('LMI-', 0) / total,
+                    'Non-sig LMI': counts.get('Non-sig LMI', 0) / total
+                })
+        return pd.DataFrame(results)
+
+    # Compute proportions for each group
+    pot_rew = compute_proportions(potentiation, 'R+')
+    pot_nonrew = compute_proportions(potentiation, 'R-')
+    dep_rew = compute_proportions(depression, 'R+')
+    dep_nonrew = compute_proportions(depression, 'R-')
+
+    # Set seaborn theme
+    sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1.3)
+
+    # Plot with grouped bars (3 bars per reward group)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Define colors for LMI categories
+    lmi_colors = {
+        'LMI+': '#d62728',   # Red
+        'LMI-': '#1f77b4',   # Blue
+        'Non-sig LMI': '#7f7f7f'  # Gray
+    }
+
+    # Potentiation
+    ax = axes[0]
+    pot_data = pd.concat([pot_rew, pot_nonrew])
+    if len(pot_data) > 0:
+        pot_melted = pot_data.melt(
+            id_vars=['mouse_id', 'reward_group'],
+            value_vars=['LMI+', 'LMI-', 'Non-sig LMI'],
+            var_name='lmi_category',
+            value_name='proportion'
+        )
+        # Grouped barplot: x=reward_group, hue=lmi_category
+        sns.barplot(
+            data=pot_melted, x='reward_group', y='proportion', hue='lmi_category',
+            order=['R+', 'R-'], hue_order=['LMI+', 'LMI-', 'Non-sig LMI'],
+            errorbar='se', ax=ax, alpha=0.8, palette=lmi_colors,
+            edgecolor='black', linewidth=1.5
+        )
+        ax.set_title('Potentiation cells: LMI distribution', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Proportion of cells', fontsize=12)
+        ax.set_xlabel('Reward group', fontsize=12)
+        ax.set_ylim(0, 1.15)
+        ax.axhline(1/3, color='black', linestyle='--', linewidth=1, alpha=0.3, label='Expected (33%)')
+        ax.legend(title='LMI category', loc='best', frameon=False, fontsize=10)
+
+        # Add statistical tests comparing LMI+ vs LMI- for each reward group
+        for rg_idx, reward_group in enumerate(['R+', 'R-']):
+            group_data = pot_data[pot_data['reward_group'] == reward_group]
+            if len(group_data) >= 3:
+                lmi_plus_vals = group_data['LMI+'].values
+                lmi_minus_vals = group_data['LMI-'].values
+
+                try:
+                    stat, p = wilcoxon(lmi_plus_vals, lmi_minus_vals, alternative='two-sided')
+
+                    # Determine significance level
+                    if p < 0.001:
+                        sig_str = '***'
+                    elif p < 0.01:
+                        sig_str = '**'
+                    elif p < 0.05:
+                        sig_str = '*'
+                    else:
+                        sig_str = 'ns'
+
+                    # Add visual annotation
+                    x_pos = rg_idx
+                    y_max = 1.05
+
+                    # Draw horizontal line connecting LMI+ and LMI- bars
+                    bar_width = 0.25
+                    ax.plot([x_pos - bar_width, x_pos + bar_width], [y_max, y_max], 'k-', linewidth=1.5)
+
+                    # Add text annotation
+                    ax.text(x_pos, y_max + 0.02, f'{sig_str}\np={p:.3f}',
+                           ha='center', va='bottom', fontsize=9)
+
+                except Exception as e:
+                    print(f"    Warning: Could not perform Wilcoxon test for {reward_group}: {e}")
+                    continue
+    else:
+        ax.text(0.5, 0.5, 'No potentiation data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Potentiation cells: LMI distribution', fontsize=14, fontweight='bold')
+
+    # Depression
+    ax = axes[1]
+    dep_data = pd.concat([dep_rew, dep_nonrew])
+    if len(dep_data) > 0:
+        dep_melted = dep_data.melt(
+            id_vars=['mouse_id', 'reward_group'],
+            value_vars=['LMI+', 'LMI-', 'Non-sig LMI'],
+            var_name='lmi_category',
+            value_name='proportion'
+        )
+        sns.barplot(
+            data=dep_melted, x='reward_group', y='proportion', hue='lmi_category',
+            order=['R+', 'R-'], hue_order=['LMI+', 'LMI-', 'Non-sig LMI'],
+            errorbar='se', ax=ax, alpha=0.8, palette=lmi_colors,
+            edgecolor='black', linewidth=1.5
+        )
+        ax.set_title('Depression cells: LMI distribution', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Proportion of cells', fontsize=12)
+        ax.set_xlabel('Reward group', fontsize=12)
+        ax.set_ylim(0, 1.15)
+        ax.axhline(1/3, color='black', linestyle='--', linewidth=1, alpha=0.3)
+        ax.legend(title='LMI category', loc='best', frameon=False, fontsize=10)
+
+        # Add statistical tests comparing LMI+ vs LMI- for each reward group
+        for rg_idx, reward_group in enumerate(['R+', 'R-']):
+            group_data = dep_data[dep_data['reward_group'] == reward_group]
+            if len(group_data) >= 3:
+                lmi_plus_vals = group_data['LMI+'].values
+                lmi_minus_vals = group_data['LMI-'].values
+
+                try:
+                    stat, p = wilcoxon(lmi_plus_vals, lmi_minus_vals, alternative='two-sided')
+
+                    # Determine significance level
+                    if p < 0.001:
+                        sig_str = '***'
+                    elif p < 0.01:
+                        sig_str = '**'
+                    elif p < 0.05:
+                        sig_str = '*'
+                    else:
+                        sig_str = 'ns'
+
+                    # Add visual annotation
+                    x_pos = rg_idx
+                    y_max = 1.05
+
+                    # Draw horizontal line connecting LMI+ and LMI- bars
+                    bar_width = 0.25
+                    ax.plot([x_pos - bar_width, x_pos + bar_width], [y_max, y_max], 'k-', linewidth=1.5)
+
+                    # Add text annotation
+                    ax.text(x_pos, y_max + 0.02, f'{sig_str}\np={p:.3f}',
+                           ha='center', va='bottom', fontsize=9)
+
+                except Exception as e:
+                    print(f"    Warning: Could not perform Wilcoxon test for {reward_group}: {e}")
+                    continue
+    else:
+        ax.text(0.5, 0.5, 'No depression data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Depression cells: LMI distribution', fontsize=14, fontweight='bold')
+
+    plt.tight_layout()
+    sns.despine()
+
+    # Save figure
+    save_path_svg = os.path.join(output_dir, 'lmi_distribution_in_plasticity_groups.svg')
+    save_path_png = os.path.join(output_dir, 'lmi_distribution_in_plasticity_groups.png')
+    plt.savefig(save_path_svg, format='svg', dpi=150, bbox_inches='tight')
+    plt.savefig(save_path_png, format='png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"  ✓ Figure saved to: {save_path_svg}")
+    print(f"  ✓ Figure saved to: {save_path_png}")
+
+    # Print summary statistics
+    print("\n  Summary statistics:")
+    for plasticity_type, data in [('Potentiation', pot_data), ('Depression', dep_data)]:
+        if len(data) > 0:
+            print(f"\n  {plasticity_type}:")
+            for reward_group in ['R+', 'R-']:
+                group_data = data[data['reward_group'] == reward_group]
+                if len(group_data) > 0:
+                    mean_lmi_plus = group_data['LMI+'].mean()
+                    mean_lmi_minus = group_data['LMI-'].mean()
+                    mean_nonsig = group_data['Non-sig LMI'].mean()
+                    print(f"    {reward_group}: LMI+={mean_lmi_plus:.2%}, LMI-={mean_lmi_minus:.2%}, Non-sig={mean_nonsig:.2%} (n={len(group_data)} mice)")
+
+                    # Wilcoxon test: LMI+ vs LMI-
+                    if len(group_data) >= 3:
+                        try:
+                            stat, p = wilcoxon(group_data['LMI+'].values, group_data['LMI-'].values, alternative='two-sided')
+                            print(f"      Wilcoxon LMI+ vs LMI-: p={p:.4f}")
+                        except Exception:
+                            pass
+
+
+def plot_plasticity_distribution_in_lmi_groups(results_plasticity, output_dir):
+    """
+    Plot distribution of plasticity types within LMI categories.
+
+    INVERSE of plot_lmi_distribution_in_plasticity_groups:
+    For each LMI category (LMI+, LMI-, non-sig), shows proportion of cells
+    that are potentiated vs depressed.
+
+    Parameters
+    ----------
+    results_plasticity : pd.DataFrame
+        All sigmoid-significant cells with columns: mouse_id, roi, reward_group,
+        lmi_p, plasticity_group
+    output_dir : str
+        Output directory for saving figure
+    """
+    print("\nPlotting plasticity distribution within LMI groups...")
+
+    LMI_POS_THRESH = 0.975
+    LMI_NEG_THRESH = 0.025
+
+    def categorize_lmi(lmi_p):
+        """Categorize cells by LMI percentile."""
+        if lmi_p >= LMI_POS_THRESH:
+            return 'LMI+'
+        elif lmi_p <= LMI_NEG_THRESH:
+            return 'LMI-'
+        else:
+            return 'Non-sig LMI'
+
+    # Categorize cells by LMI
+    results_plasticity = results_plasticity.copy()
+    results_plasticity['lmi_category'] = results_plasticity['lmi_p'].apply(categorize_lmi)
+
+    def compute_proportions(df, lmi_cat, reward_group):
+        """Compute proportions of potentiation/depression per mouse for a given LMI category."""
+        group_df = df[(df['lmi_category'] == lmi_cat) & (df['reward_group'] == reward_group)]
+        results = []
+        for mouse in group_df['mouse_id'].unique():
+            mouse_df = group_df[group_df['mouse_id'] == mouse]
+            counts = mouse_df['plasticity_group'].value_counts()
+            total = len(mouse_df)
+            if total > 0:
+                results.append({
+                    'mouse_id': mouse,
+                    'reward_group': reward_group,
+                    'lmi_category': lmi_cat,
+                    'Potentiation': counts.get('Potentiation', 0) / total,
+                    'Depression': counts.get('Depression', 0) / total
+                })
+        return pd.DataFrame(results)
+
+    # Compute proportions for each LMI category and reward group
+    all_data = []
+    for lmi_cat in ['LMI+', 'LMI-', 'Non-sig LMI']:
+        for reward_group in ['R+', 'R-']:
+            props = compute_proportions(results_plasticity, lmi_cat, reward_group)
+            all_data.append(props)
+
+    combined_data = pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
+
+    if len(combined_data) == 0:
+        print("  WARNING: No data available for plasticity distribution in LMI groups")
+        return
+
+    # Set seaborn theme
+    sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1.3)
+
+    # Plot with 3 subplots (one for each LMI category)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # Define colors for plasticity groups
+    plasticity_colors = {
+        'Potentiation': '#e74c3c',  # Red
+        'Depression': '#3498db'      # Blue
+    }
+
+    lmi_categories = ['LMI+', 'LMI-', 'Non-sig LMI']
+
+    for idx, lmi_cat in enumerate(lmi_categories):
+        ax = axes[idx]
+        cat_data = combined_data[combined_data['lmi_category'] == lmi_cat]
+
+        if len(cat_data) > 0:
+            # Melt data for plotting
+            cat_melted = cat_data.melt(
+                id_vars=['mouse_id', 'reward_group', 'lmi_category'],
+                value_vars=['Potentiation', 'Depression'],
+                var_name='plasticity_type',
+                value_name='proportion'
+            )
+
+            # Grouped barplot: x=reward_group, hue=plasticity_type
+            sns.barplot(
+                data=cat_melted, x='reward_group', y='proportion', hue='plasticity_type',
+                order=['R+', 'R-'], hue_order=['Potentiation', 'Depression'],
+                errorbar='se', ax=ax, alpha=0.8, palette=plasticity_colors,
+                edgecolor='black', linewidth=1.5
+            )
+            ax.set_title(f'{lmi_cat} cells', fontsize=14, fontweight='bold')
+            ax.set_ylabel('Proportion of cells', fontsize=12)
+            ax.set_xlabel('Reward group', fontsize=12)
+            ax.set_ylim(0, 1.15)  # Extra space for annotations
+            ax.axhline(0.5, color='black', linestyle='--', linewidth=1, alpha=0.3, label='Equal (50%)')
+
+            # Statistical tests: Wilcoxon signed-rank test for each reward group
+            from scipy.stats import wilcoxon
+
+            for rg_idx, reward_group in enumerate(['R+', 'R-']):
+                group_data = cat_data[cat_data['reward_group'] == reward_group]
+
+                if len(group_data) >= 3:  # Need at least 3 mice for meaningful test
+                    pot_vals = group_data['Potentiation'].values
+                    dep_vals = group_data['Depression'].values
+
+                    try:
+                        # Wilcoxon signed-rank test (paired, non-parametric)
+                        stat, p = wilcoxon(pot_vals, dep_vals, alternative='two-sided')
+
+                        # Determine significance level
+                        if p < 0.001:
+                            sig_str = '***'
+                        elif p < 0.01:
+                            sig_str = '**'
+                        elif p < 0.05:
+                            sig_str = '*'
+                        else:
+                            sig_str = 'n.s.'
+
+                        # Position for annotation (above the bars)
+                        x_pos = rg_idx
+                        y_max = max(pot_vals.mean(), dep_vals.mean()) + 0.05
+
+                        # Add horizontal line connecting the two bars
+                        bar_width = 0.2  # Approximate bar width
+                        ax.plot([x_pos - bar_width, x_pos + bar_width], [y_max, y_max],
+                               'k-', linewidth=1.5)
+
+                        # Add significance text
+                        ax.text(x_pos, y_max + 0.02, f'{sig_str}\np={p:.3f}',
+                               ha='center', va='bottom', fontsize=9)
+                    except Exception as e:
+                        print(f"    Warning: Could not compute stats for {lmi_cat}/{reward_group}: {e}")
+
+            # Only show legend on first subplot
+            if idx == 0:
+                ax.legend(title='Plasticity type', loc='best', frameon=False, fontsize=10)
+            else:
+                ax.get_legend().remove()
+        else:
+            ax.text(0.5, 0.5, f'No {lmi_cat} data', ha='center', va='center',
+                   transform=ax.transAxes, fontsize=12)
+            ax.set_title(f'{lmi_cat} cells', fontsize=14, fontweight='bold')
+            ax.axis('off')
+
+    plt.tight_layout()
+    sns.despine()
+
+    # Save figure
+    save_path_svg = os.path.join(output_dir, 'plasticity_distribution_in_lmi_groups.svg')
+    save_path_png = os.path.join(output_dir, 'plasticity_distribution_in_lmi_groups.png')
+    plt.savefig(save_path_svg, format='svg', dpi=150, bbox_inches='tight')
+    plt.savefig(save_path_png, format='png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"  ✓ Figure saved to: {save_path_svg}")
+    print(f"  ✓ Figure saved to: {save_path_png}")
+
+    # Print summary statistics with statistical tests
+    from scipy.stats import wilcoxon
+    print("\n  Summary statistics (Wilcoxon signed-rank test):")
+    for lmi_cat in lmi_categories:
+        cat_data = combined_data[combined_data['lmi_category'] == lmi_cat]
+        if len(cat_data) > 0:
+            print(f"\n  {lmi_cat}:")
+            for reward_group in ['R+', 'R-']:
+                group_data = cat_data[cat_data['reward_group'] == reward_group]
+                if len(group_data) > 0:
+                    mean_pot = group_data['Potentiation'].mean()
+                    mean_dep = group_data['Depression'].mean()
+                    n_mice = len(group_data)
+
+                    # Statistical test
+                    if n_mice >= 3:
+                        try:
+                            stat, p = wilcoxon(
+                                group_data['Potentiation'].values,
+                                group_data['Depression'].values,
+                                alternative='two-sided'
+                            )
+                            print(f"    {reward_group}: Potentiation={mean_pot:.2%}, Depression={mean_dep:.2%} "
+                                  f"(n={n_mice} mice, p={p:.4f})")
+                        except Exception as e:
+                            print(f"    {reward_group}: Potentiation={mean_pot:.2%}, Depression={mean_dep:.2%} "
+                                  f"(n={n_mice} mice, stats failed)")
+                    else:
+                        print(f"    {reward_group}: Potentiation={mean_pot:.2%}, Depression={mean_dep:.2%} "
+                              f"(n={n_mice} mice, insufficient for stats)")
+
+
+def plot_lmi_vs_plasticity_scatter(results_lmi, response_df, output_dir, alpha=0.05):
+    """
+    Scatter plot: LMI (x-axis) vs plasticity index (y-axis).
+
+    Two panels: one for R+, one for R-.  Dots coloured by LMI sign (red LMI+,
+    blue LMI-).
+
+    Plasticity index = mean post-inflection response - mean pre-inflection response
+    (same metric used in the barplot quantifications).
+    Cell selection: significant LMI cells that also pass the sigmoid vs flat test
+    (p_value_vs_flat < alpha), so that the inflection-based pre/post split is
+    meaningful.
+
+    Parameters
+    ----------
+    results_lmi : pd.DataFrame
+        LMI-significant cells with columns: mouse_id, roi, lmi, lmi_sign,
+        reward_group, p_value_vs_flat
+    response_df : pd.DataFrame
+        Pre/post responses with columns: mouse_id, roi, response, period
+    output_dir : str
+        Output directory for saving figure
+    alpha : float
+        Significance threshold for sigmoid vs flat filter
+    """
+    print("\nPlotting LMI vs plasticity scatter...")
+
+    # Keep only cells whose sigmoid fit is significantly better than flat —
+    # without this the inflection point (and thus the pre/post split) is noise.
+    results_sig = results_lmi[results_lmi['p_value_vs_linear'] < alpha].copy()
+    print(f"  LMI-significant cells passing sigmoid vs flat: {len(results_sig)} "
+          f"(of {len(results_lmi)} total LMI-significant)")
+
+    # Pivot to get one row per cell with pre and post columns
+    pivot = response_df.pivot_table(
+        index=['mouse_id', 'roi'],
+        columns='period',
+        values='response'
+    ).reset_index()
+
+    # Drop cells missing either period
+    pivot = pivot.dropna(subset=['pre', 'post'])
+
+    # Plasticity index: post - pre
+    pivot['plasticity'] = pivot['post'] - pivot['pre']
+
+    # Merge with filtered results to get LMI value, sign, and reward group
+    scatter_df = pivot.merge(
+        results_sig[['mouse_id', 'roi', 'lmi', 'lmi_sign', 'reward_group']],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+
+    if len(scatter_df) == 0:
+        print("  WARNING: No cells to plot in LMI vs plasticity scatter")
+        return
+
+    sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1.3)
+
+    lmi_palette = {'Positive': '#d62728', 'Negative': '#1f77b4'}  # red LMI+, blue LMI-
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+
+    from scipy.stats import pearsonr
+    print("\n  Correlations (LMI vs plasticity):")
+
+    for ax, rg in zip(axes, ['R+', 'R-']):
+        sub = scatter_df[scatter_df['reward_group'] == rg]
+
+        sns.scatterplot(
+            data=sub, x='lmi', y='plasticity', hue='lmi_sign',
+            palette=lmi_palette, hue_order=['Positive', 'Negative'],
+            alpha=0.6, edgecolor='black', linewidth=0.5, s=40, ax=ax
+        )
+
+        # Reference lines at zero
+        ax.axhline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.4)
+        ax.axvline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.4)
+
+        ax.set_xlabel('LMI', fontsize=13)
+        ax.set_ylabel('Plasticity index (post − pre, %ΔF/F)', fontsize=13)
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-100, 100)
+        ax.set_title(f'{rg} (n={len(sub)} cells)', fontsize=14, fontweight='bold')
+
+        sns.despine(ax=ax)
+
+        # Correlation per LMI sign
+        if len(sub) > 2:
+            r, p = pearsonr(sub['lmi'], sub['plasticity'])
+            print(f"    {rg} (all): r={r:.3f}, p={p:.4f} (n={len(sub)})")
+        for sign, label in [('Positive', 'LMI+'), ('Negative', 'LMI-')]:
+            s = sub[sub['lmi_sign'] == sign]
+            if len(s) > 2:
+                r, p = pearsonr(s['lmi'], s['plasticity'])
+                print(f"    {rg} {label}: r={r:.3f}, p={p:.4f} (n={len(s)})")
+
+    plt.tight_layout()
+
+    # Save
+    save_path_svg = os.path.join(output_dir, 'lmi_vs_plasticity_scatter.svg')
+    save_path_png = os.path.join(output_dir, 'lmi_vs_plasticity_scatter.png')
+    plt.savefig(save_path_svg, format='svg', dpi=150, bbox_inches='tight')
+    plt.savefig(save_path_png, format='png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"\n  ✓ Scatter plot saved (n={len(scatter_df)} cells)")
+
+
+def plot_lmi_vs_plasticity_scatter_participation(
+    results_lmi, response_df, participation_df, output_dir, alpha=0.05
+):
+    """
+    Scatter plot: LMI (x) vs plasticity index (y), coloured by day-0 reactivation
+    participation rate.
+
+    Same cell selection as plot_lmi_vs_plasticity_scatter (significant LMI + sigmoid
+    vs flat gate), further restricted to cells present in the participation CSV and
+    flagged as reliable (≥ min_events_for_reliability reactivation events on day 0).
+
+    Parameters
+    ----------
+    results_lmi : pd.DataFrame
+        LMI-significant cells (mouse_id, roi, lmi, lmi_sign, reward_group,
+        p_value_vs_flat).
+    response_df : pd.DataFrame
+        Pre/post responses (mouse_id, roi, response, period).
+    participation_df : pd.DataFrame
+        Loaded from cell_participation_rates_aggregated.csv (mouse_id, roi,
+        learning_rate, reliable_learning).
+    output_dir : str
+        Output directory.
+    alpha : float
+        Significance threshold for sigmoid vs flat filter.
+    """
+    from scipy.stats import pearsonr
+
+    print("\nPlotting LMI vs plasticity scatter (participation rate colour)...")
+
+    # --- cell selection: sigmoid vs flat gate ---
+    results_sig = results_lmi[results_lmi['p_value_vs_flat'] < alpha].copy()
+    print(f"  LMI-significant cells passing sigmoid vs flat: {len(results_sig)} "
+          f"(of {len(results_lmi)} total LMI-significant)")
+
+    # --- plasticity index: post − pre ---
+    pivot = response_df.pivot_table(
+        index=['mouse_id', 'roi'],
+        columns='period',
+        values='response'
+    ).reset_index()
+    pivot = pivot.dropna(subset=['pre', 'post'])
+    pivot['plasticity'] = pivot['post'] - pivot['pre']
+
+    # --- merge with LMI info ---
+    scatter_df = pivot.merge(
+        results_sig[['mouse_id', 'roi', 'lmi', 'lmi_sign', 'reward_group']],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+
+    # --- merge with participation rates (inner: keeps only cells with data) ---
+    scatter_df = scatter_df.merge(
+        participation_df[['mouse_id', 'roi', 'learning_rate', 'reliable_learning']],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+    print(f"  After participation merge: {len(scatter_df)} cells")
+
+    # --- reliability filter ---
+    scatter_df = scatter_df[scatter_df['reliable_learning'] == True].copy()
+    print(f"  After reliability filter (≥5 reactivation events): {len(scatter_df)} cells")
+
+    if len(scatter_df) == 0:
+        print("  WARNING: No cells to plot — skipping participation scatter")
+        return
+
+    # --- plot ---
+    sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1.3)
+
+    # Dedicated narrow column for the colourbar so it doesn't overlap the panels
+    fig = plt.figure(figsize=(15, 5.5))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.04], wspace=0.3)
+    axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])]
+    cax = fig.add_subplot(gs[0, 2])
+
+    sc_ref = None  # first scatter object, used for the shared colourbar
+
+    print("\n  Correlations (participation rate vs LMI / plasticity):")
+
+    for ax, rg in zip(axes, ['R+', 'R-']):
+        # Sort by participation rate so high-rate dots are drawn on top
+        sub = scatter_df[scatter_df['reward_group'] == rg].sort_values('learning_rate')
+
+        sc = ax.scatter(
+            sub['lmi'], sub['plasticity'],
+            c=sub['learning_rate'],
+            cmap='YlOrRd', vmin=0, vmax=1,
+            alpha=0.7, edgecolors='black', linewidths=0.5, s=40
+        )
+        if sc_ref is None:
+            sc_ref = sc
+
+        # Reference lines
+        ax.axhline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.4)
+        ax.axvline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.4)
+
+        ax.set_xlabel('LMI', fontsize=13)
+        ax.set_ylabel('Plasticity index (post − pre, %ΔF/F)', fontsize=13)
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-100, 100)
+        ax.set_title(f'{rg} (n={len(sub)} cells)', fontsize=14, fontweight='bold')
+        sns.despine(ax=ax)
+
+        # Correlations
+        if len(sub) > 2:
+            r_lmi, p_lmi = pearsonr(sub['lmi'], sub['learning_rate'])
+            r_plast, p_plast = pearsonr(sub['plasticity'], sub['learning_rate'])
+            print(f"    {rg}: part.rate vs LMI:       r={r_lmi:.3f}, p={p_lmi:.4f} (n={len(sub)})")
+            print(f"    {rg}: part.rate vs plasticity: r={r_plast:.3f}, p={p_plast:.4f}")
+
+    # Colourbar in its own dedicated axis
+    cbar = fig.colorbar(sc_ref, cax=cax)
+    cbar.set_label('Reactivation participation rate (day 0)', fontsize=11)
+
+    # Save
+    save_path_svg = os.path.join(output_dir, 'lmi_vs_plasticity_scatter_participation.svg')
+    save_path_png = os.path.join(output_dir, 'lmi_vs_plasticity_scatter_participation.png')
+    plt.savefig(save_path_svg, format='svg', dpi=150, bbox_inches='tight')
+    plt.savefig(save_path_png, format='png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"\n  ✓ Participation scatter saved (n={len(scatter_df)} cells)")
+
+
+def plot_lmi_vs_plasticity_scatter_participation_by_inflection(
+    results_lmi, response_df, participation_inflection_df, output_dir,
+    inflection_phase='before', alpha=0.05
+):
+    """
+    Scatter plot: LMI (x) vs plasticity index (y), coloured by participation rate
+    before or after the inflection point.
+
+    Parameters
+    ----------
+    results_lmi : pd.DataFrame
+        LMI-significant cells
+    response_df : pd.DataFrame
+        Pre/post responses
+    participation_inflection_df : pd.DataFrame
+        Loaded from cell_participation_rates_by_inflection.csv with columns:
+        participation_rate_before, participation_rate_after, reliable_before, reliable_after
+    output_dir : str
+        Output directory
+    inflection_phase : str
+        'before' or 'after' — which participation rate to plot
+    alpha : float
+        Significance threshold for sigmoid vs flat filter
+    """
+    from scipy.stats import pearsonr
+
+    # Determine which columns to use
+    if inflection_phase == 'before':
+        rate_col = 'participation_rate_before'
+        reliable_col = 'reliable_before'
+        title_suffix = 'before inflection'
+        filename_suffix = 'before_inflection'
+    elif inflection_phase == 'after':
+        rate_col = 'participation_rate_after'
+        reliable_col = 'reliable_after'
+        title_suffix = 'after inflection'
+        filename_suffix = 'after_inflection'
+    else:
+        raise ValueError(f"inflection_phase must be 'before' or 'after', got {inflection_phase}")
+
+    print(f"\nPlotting LMI vs plasticity scatter (participation rate {title_suffix})...")
+
+    # --- Cell selection: sigmoid vs flat gate ---
+    results_sig = results_lmi[results_lmi['p_value_vs_flat'] < alpha].copy()
+    print(f"  LMI-significant cells passing sigmoid vs flat: {len(results_sig)} "
+          f"(of {len(results_lmi)} total LMI-significant)")
+
+    # --- Plasticity index: post − pre ---
+    pivot = response_df.pivot_table(
+        index=['mouse_id', 'roi'],
+        columns='period',
+        values='response'
+    ).reset_index()
+    pivot = pivot.dropna(subset=['pre', 'post'])
+    pivot['plasticity'] = pivot['post'] - pivot['pre']
+
+    # --- Merge with LMI info ---
+    scatter_df = pivot.merge(
+        results_sig[['mouse_id', 'roi', 'lmi', 'lmi_sign', 'reward_group']],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+
+    # --- Merge with inflection participation rates ---
+    scatter_df = scatter_df.merge(
+        participation_inflection_df[['mouse_id', 'roi', rate_col, reliable_col]],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+    print(f"  After participation merge: {len(scatter_df)} cells")
+
+    # --- Reliability filter ---
+    scatter_df = scatter_df[scatter_df[reliable_col] == True].copy()
+    print(f"  After reliability filter: {len(scatter_df)} cells")
+
+    if len(scatter_df) == 0:
+        print(f"  WARNING: No cells to plot — skipping {title_suffix} scatter")
+        return
+
+    # --- Plot ---
+    sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1.3)
+
+    fig = plt.figure(figsize=(15, 5.5))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.04], wspace=0.3)
+    axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])]
+    cax = fig.add_subplot(gs[0, 2])
+
+    sc_ref = None
+
+    print(f"\n  Correlations (participation rate {title_suffix} vs LMI / plasticity):")
+
+    for ax, rg in zip(axes, ['R+', 'R-']):
+        sub = scatter_df[scatter_df['reward_group'] == rg].sort_values(rate_col)
+
+        sc = ax.scatter(
+            sub['lmi'], sub['plasticity'],
+            c=sub[rate_col],
+            cmap='YlOrRd', vmin=0, vmax=1,
+            alpha=0.7, edgecolors='black', linewidths=0.5, s=40
+        )
+        if sc_ref is None:
+            sc_ref = sc
+
+        # Reference lines
+        ax.axhline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.4)
+        ax.axvline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.4)
+
+        ax.set_xlabel('LMI', fontsize=13)
+        ax.set_ylabel('Plasticity index (post − pre, %ΔF/F)', fontsize=13)
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-100, 100)
+        ax.set_title(f'{rg} (n={len(sub)} cells)', fontsize=14, fontweight='bold')
+        sns.despine(ax=ax)
+
+        # Correlations
+        if len(sub) > 2:
+            r_lmi, p_lmi = pearsonr(sub['lmi'], sub[rate_col])
+            r_plast, p_plast = pearsonr(sub['plasticity'], sub[rate_col])
+            print(f"    {rg}: part.rate vs LMI:       r={r_lmi:.3f}, p={p_lmi:.4f} (n={len(sub)})")
+            print(f"    {rg}: part.rate vs plasticity: r={r_plast:.3f}, p={p_plast:.4f}")
+
+    # Colourbar
+    cbar = fig.colorbar(sc_ref, cax=cax)
+    cbar.set_label(f'Reactivation participation rate ({title_suffix})', fontsize=11)
+
+    # Save
+    save_path_svg = os.path.join(output_dir, f'lmi_vs_plasticity_scatter_participation_{filename_suffix}.svg')
+    save_path_png = os.path.join(output_dir, f'lmi_vs_plasticity_scatter_participation_{filename_suffix}.png')
+    plt.savefig(save_path_svg, format='svg', dpi=150, bbox_inches='tight')
+    plt.savefig(save_path_png, format='png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"\n  ✓ Participation scatter ({title_suffix}) saved (n={len(scatter_df)} cells)")
+
+
+def plot_participation_rate_by_lmi_plasticity_groups(
+    results_lmi, response_df, participation_df, output_dir, alpha=0.05
+):
+    """
+    Barplots comparing average participation rates (day 0) across cells grouped by
+    LMI sign and plasticity sign.
+
+    4 subplots in 2×2 grid:
+      - R+ / LMI+: positive plasticity vs negative plasticity
+      - R+ / LMI-: positive plasticity vs negative plasticity
+      - R- / LMI+: positive plasticity vs negative plasticity
+      - R- / LMI-: positive plasticity vs negative plasticity
+
+    Statistical test: Mann-Whitney U (two-sided), comparing positive vs negative
+    plasticity within each subplot.
+
+    Parameters
+    ----------
+    results_lmi : pd.DataFrame
+        LMI-significant cells.
+    response_df : pd.DataFrame
+        Pre/post responses.
+    participation_df : pd.DataFrame
+        Participation rates from aggregated CSV.
+    output_dir : str
+        Output directory.
+    alpha : float
+        Significance for sigmoid vs flat filter.
+    """
+    from scipy.stats import mannwhitneyu
+
+    print("\nPlotting participation rate barplots by LMI / plasticity groups...")
+
+    # --- Build scatter_df (same pipeline as participation scatter) ---
+    results_sig = results_lmi[results_lmi['p_value_vs_flat'] < alpha].copy()
+
+    pivot = response_df.pivot_table(
+        index=['mouse_id', 'roi'],
+        columns='period',
+        values='response'
+    ).reset_index()
+    pivot = pivot.dropna(subset=['pre', 'post'])
+    pivot['plasticity'] = pivot['post'] - pivot['pre']
+
+    scatter_df = pivot.merge(
+        results_sig[['mouse_id', 'roi', 'lmi', 'lmi_sign', 'reward_group']],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+
+    scatter_df = scatter_df.merge(
+        participation_df[['mouse_id', 'roi', 'learning_rate', 'reliable_learning']],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+
+    scatter_df = scatter_df[scatter_df['reliable_learning'] == True].copy()
+
+    if len(scatter_df) == 0:
+        print("  WARNING: No cells for participation barplots — skipping")
+        return
+
+    # Add plasticity sign column
+    scatter_df['plasticity_sign'] = scatter_df['plasticity'].apply(
+        lambda x: 'Positive' if x > 0 else 'Negative'
+    )
+
+    print(f"  Using {len(scatter_df)} cells with reliable participation data")
+
+    # --- Create figure: 2×2 grid ---
+    sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1.2)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    # Define subplot configurations: (reward_group, lmi_sign, row, col)
+    configs = [
+        ('R+', 'Positive', 0, 0),
+        ('R+', 'Negative', 0, 1),
+        ('R-', 'Positive', 1, 0),
+        ('R-', 'Negative', 1, 1)
+    ]
+
+    # Colors for plasticity sign (warm = potentiation, cool = depression)
+    plasticity_colors = {'Positive': '#FF7F50', 'Negative': '#87CEEB'}  # coral, skyblue
+
+    for reward_group, lmi_sign, row, col in configs:
+        ax = axes[row, col]
+
+        # Filter cells for this subplot
+        data = scatter_df[
+            (scatter_df['reward_group'] == reward_group) &
+            (scatter_df['lmi_sign'] == lmi_sign)
+        ]
+
+        if len(data) == 0:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center',
+                   transform=ax.transAxes, fontsize=12)
+            ax.set_title(f'{reward_group} / LMI{lmi_sign[0]}', fontweight='bold')
+            ax.set_ylabel('Participation rate')
+            ax.set_ylim(0, 1)
+            sns.despine(ax=ax)
+            continue
+
+        # Separate by plasticity sign
+        pos_plast = data[data['plasticity_sign'] == 'Positive']['learning_rate']
+        neg_plast = data[data['plasticity_sign'] == 'Negative']['learning_rate']
+
+        # Compute means and SEMs
+        groups_data = []
+        for plast_sign in ['Positive', 'Negative']:
+            vals = data[data['plasticity_sign'] == plast_sign]['learning_rate']
+            groups_data.append({
+                'sign': plast_sign,
+                'mean': vals.mean() if len(vals) > 0 else 0,
+                'sem': vals.sem() if len(vals) > 0 else 0,
+                'n': len(vals),
+                'values': vals
+            })
+
+        # Barplot
+        x_pos = [0, 1]
+        means = [g['mean'] for g in groups_data]
+        sems = [g['sem'] for g in groups_data]
+        colors = [plasticity_colors[g['sign']] for g in groups_data]
+
+        bars = ax.bar(x_pos, means, yerr=sems, capsize=5, alpha=0.8,
+                     color=colors, edgecolor='black', linewidth=1.5)
+
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(['Pos plasticity', 'Neg plasticity'], fontsize=11)
+        ax.set_ylabel('Participation rate (day 0)', fontsize=12)
+        ax.set_ylim(0, max(1, max(means) + max(sems) + 0.15))
+        ax.set_title(f'{reward_group} / LMI{lmi_sign[0]}', fontweight='bold', fontsize=13)
+
+        # Add n on each bar
+        for i, (bar, g) in enumerate(zip(bars, groups_data)):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + sems[i] + 0.02,
+                   f'n={g["n"]}', ha='center', va='bottom', fontsize=9)
+
+        # Statistical test: Mann-Whitney U
+        if len(pos_plast) > 0 and len(neg_plast) > 0:
+            try:
+                stat, p = mannwhitneyu(pos_plast, neg_plast, alternative='two-sided')
+
+                # Significance annotation
+                y_max = max(means) + max(sems) + 0.06
+                ax.plot([0, 1], [y_max, y_max], 'k-', linewidth=1.5)
+
+                if p < 0.001:
+                    sig_str = '***'
+                elif p < 0.01:
+                    sig_str = '**'
+                elif p < 0.05:
+                    sig_str = '*'
+                else:
+                    sig_str = 'n.s.'
+
+                ax.text(0.5, y_max + 0.01, f'{sig_str}\np={p:.4f}',
+                       ha='center', va='bottom', fontsize=10)
+            except Exception as e:
+                print(f"  WARNING: Stats failed for {reward_group}/{lmi_sign}: {e}")
+
+        sns.despine(ax=ax)
+
+    plt.tight_layout()
+
+    # Save
+    save_path_svg = os.path.join(output_dir, 'participation_rate_by_lmi_plasticity_groups.svg')
+    save_path_png = os.path.join(output_dir, 'participation_rate_by_lmi_plasticity_groups.png')
+    plt.savefig(save_path_svg, format='svg', dpi=150, bbox_inches='tight')
+    plt.savefig(save_path_png, format='png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"\n  ✓ Participation rate barplots saved")
+
+
+def plot_participation_rate_before_after_inflection_by_groups(
+    results_lmi, response_df, participation_inflection_df, output_dir, alpha=0.05
+):
+    """
+    Barplots comparing participation rates BEFORE vs AFTER inflection for
+    4 groups: LMI+/positive plasticity, LMI+/negative plasticity,
+             LMI-/positive plasticity, LMI-/negative plasticity.
+
+    Two panels (R+ and R-), each showing 4 groups with before/after bars.
+
+    Statistical test: Wilcoxon signed-rank test (paired), comparing before vs after
+    within each group.
+
+    Parameters
+    ----------
+    results_lmi : pd.DataFrame
+        LMI-significant cells.
+    response_df : pd.DataFrame
+        Pre/post responses.
+    participation_inflection_df : pd.DataFrame
+        Before/after inflection participation rates (mouse_id, roi,
+        participation_rate_before, participation_rate_after, reliable_before, reliable_after).
+    output_dir : str
+        Output directory.
+    alpha : float
+        Significance for sigmoid vs flat filter.
+    """
+    from scipy.stats import wilcoxon
+
+    print("\nPlotting participation rate before/after inflection by LMI × plasticity groups...")
+
+    # --- Build merged dataframe (same pipeline as participation scatter) ---
+    results_sig = results_lmi[results_lmi['p_value_vs_flat'] < alpha].copy()
+
+    pivot = response_df.pivot_table(
+        index=['mouse_id', 'roi'],
+        columns='period',
+        values='response'
+    ).reset_index()
+    pivot = pivot.dropna(subset=['pre', 'post'])
+    pivot['plasticity'] = pivot['post'] - pivot['pre']
+
+    merged_df = pivot.merge(
+        results_sig[['mouse_id', 'roi', 'lmi', 'lmi_sign', 'reward_group']],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+
+    merged_df = merged_df.merge(
+        participation_inflection_df[[
+            'mouse_id', 'roi', 'participation_rate_before', 'participation_rate_after',
+            'reliable_before', 'reliable_after'
+        ]],
+        on=['mouse_id', 'roi'],
+        how='inner'
+    )
+
+    # Filter: require reliable data in BOTH before and after
+    merged_df = merged_df[
+        (merged_df['reliable_before'] == True) &
+        (merged_df['reliable_after'] == True)
+    ].copy()
+
+    if len(merged_df) == 0:
+        print("  WARNING: No cells with reliable before AND after data — skipping")
+        return
+
+    # Add plasticity sign column
+    merged_df['plasticity_sign'] = merged_df['plasticity'].apply(
+        lambda x: 'Positive' if x > 0 else 'Negative'
+    )
+
+    print(f"  Using {len(merged_df)} cells with reliable before/after data")
+
+    # --- Create figure: 2 panels (R+, R-) ---
+    sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1.2)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Colors for before/after
+    phase_colors = {'Before': '#4A90E2', 'After': '#E94B3C'}  # blue, red
+
+    for ax, reward_group in zip(axes, ['R+', 'R-']):
+        data_rg = merged_df[merged_df['reward_group'] == reward_group]
+
+        if len(data_rg) == 0:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center',
+                   transform=ax.transAxes, fontsize=12)
+            ax.set_title(f'{reward_group}', fontweight='bold', fontsize=14)
+            ax.set_ylabel('Participation rate')
+            ax.set_ylim(0, 1)
+            sns.despine(ax=ax)
+            continue
+
+        # Define 4 groups: LMI sign × plasticity sign
+        groups = [
+            ('Positive', 'Positive', 'LMI+/Pot'),
+            ('Positive', 'Negative', 'LMI+/Dep'),
+            ('Negative', 'Positive', 'LMI-/Pot'),
+            ('Negative', 'Negative', 'LMI-/Dep')
+        ]
+
+        # Prepare data for plotting
+        x_positions = []
+        bar_data = []
+        group_labels = []
+        stats_annotations = []
+
+        bar_width = 0.35
+        group_spacing = 1.0  # space between groups
+
+        for i, (lmi_sign, plast_sign, label) in enumerate(groups):
+            group_data = data_rg[
+                (data_rg['lmi_sign'] == lmi_sign) &
+                (data_rg['plasticity_sign'] == plast_sign)
+            ]
+
+            if len(group_data) == 0:
+                continue
+
+            # Extract before and after values
+            before_vals = group_data['participation_rate_before'].values
+            after_vals = group_data['participation_rate_after'].values
+
+            # Compute means and SEMs
+            mean_before = before_vals.mean()
+            sem_before = group_data['participation_rate_before'].sem()
+            mean_after = after_vals.mean()
+            sem_after = group_data['participation_rate_after'].sem()
+
+            # Store for plotting
+            x_base = i * group_spacing
+            x_positions.append((x_base - bar_width/2, x_base + bar_width/2))
+            bar_data.append({
+                'before': (mean_before, sem_before),
+                'after': (mean_after, sem_after),
+                'n': len(group_data)
+            })
+            group_labels.append(f'{label}\n(n={len(group_data)})')
+
+            # Statistical test: Wilcoxon signed-rank (paired before vs after)
+            if len(group_data) >= 3:
+                try:
+                    stat, p = wilcoxon(before_vals, after_vals, alternative='two-sided')
+
+                    # Significance stars
+                    if p < 0.001:
+                        sig_str = '***'
+                    elif p < 0.01:
+                        sig_str = '**'
+                    elif p < 0.05:
+                        sig_str = '*'
+                    else:
+                        sig_str = 'ns'
+
+                    stats_annotations.append({
+                        'x': x_base,
+                        'y': max(mean_before + sem_before, mean_after + sem_after) + 0.05,
+                        'text': f'{sig_str}\np={p:.3f}'
+                    })
+                except Exception as e:
+                    print(f"    Warning: Could not perform Wilcoxon test for {reward_group} {label}: {e}")
+
+        # Plot bars
+        if len(bar_data) > 0:
+            for i, (x_pair, data) in enumerate(zip(x_positions, bar_data)):
+                x_before, x_after = x_pair
+
+                # Before bar
+                ax.bar(x_before, data['before'][0], bar_width,
+                      yerr=data['before'][1], capsize=4,
+                      color=phase_colors['Before'], alpha=0.8,
+                      edgecolor='black', linewidth=1.2)
+
+                # After bar
+                ax.bar(x_after, data['after'][0], bar_width,
+                      yerr=data['after'][1], capsize=4,
+                      color=phase_colors['After'], alpha=0.8,
+                      edgecolor='black', linewidth=1.2)
+
+            # Add statistical annotations
+            for annot in stats_annotations:
+                ax.text(annot['x'], annot['y'], annot['text'],
+                       ha='center', va='bottom', fontsize=9)
+
+            # Set x-axis
+            x_centers = [i * group_spacing for i in range(len(group_labels))]
+            ax.set_xticks(x_centers)
+            ax.set_xticklabels(group_labels, fontsize=10)
+            ax.set_ylabel('Participation rate', fontsize=12)
+            ax.set_ylim(0, 1.0)
+            ax.set_title(f'{reward_group}', fontweight='bold', fontsize=14)
+
+            # Legend
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor=phase_colors['Before'], edgecolor='black',
+                     linewidth=1.2, label='Before inflection'),
+                Patch(facecolor=phase_colors['After'], edgecolor='black',
+                     linewidth=1.2, label='After inflection')
+            ]
+            ax.legend(handles=legend_elements, loc='upper left', frameon=False, fontsize=10)
+
+        sns.despine(ax=ax)
+
+    plt.tight_layout()
+
+    # Save
+    save_path_svg = os.path.join(output_dir, 'participation_rate_before_after_inflection_by_groups.svg')
+    save_path_png = os.path.join(output_dir, 'participation_rate_before_after_inflection_by_groups.png')
+    plt.savefig(save_path_svg, format='svg', dpi=150, bbox_inches='tight')
+    plt.savefig(save_path_png, format='png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"\n  ✓ Before/after inflection barplots saved (n={len(merged_df)} cells)")
 
 
 def plot_inflection_timing_distributions(results_df, output_dir, alpha=0.05):
@@ -1719,10 +2940,44 @@ def main(run_fitting=RUN_FITTING, generate_pdfs=GENERATE_PDFS):
 
         print(f"\nTotal cells before LMI filtering: {len(results_df)}")
 
+        # === PLASTICITY ANALYSIS: Filter cells by sigmoid significance ===
+        # Select ALL cells that show significant sigmoid plasticity (not just LMI cells)
+        if USE_SIGMOID_FILTER == 'vs_linear':
+            p_col = 'p_value_vs_linear'
+        elif USE_SIGMOID_FILTER == 'vs_flat':
+            p_col = 'p_value_vs_flat'
+        else:
+            p_col = None  # No extra filter: keep all cells with a valid sigmoid fit
+
+        print(f"\n=== Filtering cells (USE_SIGMOID_FILTER='{USE_SIGMOID_FILTER}') ===")
+        if p_col is not None:
+            sigmoid_cells = results_df[results_df[p_col] < ALPHA].copy()
+            print(f"Total cells passing {p_col} < {ALPHA}: {len(sigmoid_cells)}")
+        else:
+            # Keep all cells that have a valid sigmoid fit (non-NaN amplitude)
+            sigmoid_cells = results_df[results_df['amplitude'].notna()].copy()
+            print(f"Total cells with valid sigmoid fit: {len(sigmoid_cells)}")
+
+        # Separate by gain amplitude sign (potentiation vs depression)
+        potentiation = sigmoid_cells[sigmoid_cells['amplitude'] > 0].copy()
+        depression = sigmoid_cells[sigmoid_cells['amplitude'] < 0].copy()
+
+        print(f"  Potentiation (positive amplitude): {len(potentiation)}")
+        print(f"  Depression (negative amplitude): {len(depression)}")
+
+        # Add plasticity group label
+        potentiation['plasticity_group'] = 'Potentiation'
+        depression['plasticity_group'] = 'Depression'
+
+        # Combine for saving (plasticity analysis)
+        results_plasticity = pd.concat([potentiation, depression], ignore_index=True)
+
+        # === LEGACY: Also keep LMI-based filtering for reference ===
         # Filter for LMI-significant cells only
         lmi_positive = results_df[results_df['lmi_p'] >= LMI_POSITIVE_THRESHOLD].copy()
         lmi_negative = results_df[results_df['lmi_p'] <= LMI_NEGATIVE_THRESHOLD].copy()
 
+        print(f"\n=== LMI-based filtering (for reference) ===")
         print(f"LMI+ cells (p >= {LMI_POSITIVE_THRESHOLD}): {len(lmi_positive)}")
         print(f"LMI- cells (p <= {LMI_NEGATIVE_THRESHOLD}): {len(lmi_negative)}")
 
@@ -1756,6 +3011,10 @@ def main(run_fitting=RUN_FITTING, generate_pdfs=GENERATE_PDFS):
         results_df.to_csv(csv_path_all, index=False)
         print(f"\nSaved all cells results to {csv_path_all}")
 
+        csv_path_plasticity = os.path.join(OUTPUT_DIR, 'plasticity_results_sigmoid_cells.csv')
+        results_plasticity.to_csv(csv_path_plasticity, index=False)
+        print(f"Saved plasticity-filtered results (sigmoid test) to {csv_path_plasticity}")
+
         csv_path_lmi = os.path.join(OUTPUT_DIR, 'plasticity_results_lmi_cells.csv')
         results_lmi.to_csv(csv_path_lmi, index=False)
         print(f"Saved LMI-filtered results to {csv_path_lmi}")
@@ -1767,64 +3026,111 @@ def main(run_fitting=RUN_FITTING, generate_pdfs=GENERATE_PDFS):
         csv_path_all = os.path.join(OUTPUT_DIR, 'plasticity_results_all_cells.csv')
         csv_path_lmi = os.path.join(OUTPUT_DIR, 'plasticity_results_lmi_cells.csv')
 
-        if not os.path.exists(csv_path_all) or not os.path.exists(csv_path_lmi):
+        if not os.path.exists(csv_path_all):
             raise FileNotFoundError(
                 f"Results files not found. Please run with run_fitting=True first.\n"
-                f"Expected files:\n  {csv_path_all}\n  {csv_path_lmi}"
+                f"Expected file:\n  {csv_path_all}"
             )
 
         results_df = pd.read_csv(csv_path_all)
-        results_lmi = pd.read_csv(csv_path_lmi)
 
         # Backward compatibility: Add new columns if they don't exist
+        # (must happen before any filtering on these columns)
         if 'p_value_vs_flat' not in results_df.columns:
             print("\n  NOTE: Old CSV format detected. Adding new p-value columns for compatibility.")
             results_df['p_value_vs_flat'] = results_df['p_value']  # Old p_value was vs flat
             results_df['p_value_vs_linear'] = np.nan  # Not computed in old version
 
-        if 'p_value_vs_flat' not in results_lmi.columns:
-            results_lmi['p_value_vs_flat'] = results_lmi['p_value']
-            results_lmi['p_value_vs_linear'] = np.nan
+        # Always re-derive plasticity groups from all-cells CSV so that the
+        # current USE_SIGMOID_FILTER setting is respected.
+        if USE_SIGMOID_FILTER == 'vs_linear':
+            p_col = 'p_value_vs_linear'
+        elif USE_SIGMOID_FILTER == 'vs_flat':
+            p_col = 'p_value_vs_flat'
+        else:
+            p_col = None
+
+        print(f"\n  Deriving plasticity groups with USE_SIGMOID_FILTER='{USE_SIGMOID_FILTER}'...")
+        if p_col is not None:
+            sigmoid_cells = results_df[results_df[p_col] < ALPHA].copy()
+            print(f"    Cells passing {p_col} < {ALPHA}: {len(sigmoid_cells)}")
+        else:
+            sigmoid_cells = results_df[results_df['amplitude'].notna()].copy()
+            print(f"    Cells with valid sigmoid fit: {len(sigmoid_cells)}")
+
+        potentiation = sigmoid_cells[sigmoid_cells['amplitude'] > 0].copy()
+        depression = sigmoid_cells[sigmoid_cells['amplitude'] < 0].copy()
+        potentiation['plasticity_group'] = 'Potentiation'
+        depression['plasticity_group'] = 'Depression'
+        results_plasticity = pd.concat([potentiation, depression], ignore_index=True)
+        print(f"    Potentiation: {len(potentiation)}, Depression: {len(depression)}")
+
+        # Load LMI results if available
+        if os.path.exists(csv_path_lmi):
+            results_lmi = pd.read_csv(csv_path_lmi)
+            if 'p_value_vs_flat' not in results_lmi.columns:
+                results_lmi['p_value_vs_flat'] = results_lmi['p_value']
+                results_lmi['p_value_vs_linear'] = np.nan
+        else:
+            # Recreate LMI filtering from all cells
+            print("\n  NOTE: LMI CSV not found. Recreating from all cells...")
+            lmi_positive = results_df[results_df['lmi_p'] >= LMI_POSITIVE_THRESHOLD].copy()
+            lmi_negative = results_df[results_df['lmi_p'] <= LMI_NEGATIVE_THRESHOLD].copy()
+            lmi_positive['lmi_sign'] = 'Positive'
+            lmi_negative['lmi_sign'] = 'Negative'
+            results_lmi = pd.concat([lmi_positive, lmi_negative], ignore_index=True)
 
         print(f"\nLoaded all cells results from {csv_path_all}")
-        print(f"Loaded LMI-filtered results from {csv_path_lmi}")
         print(f"Total cells: {len(results_df)}")
+        print(f"Plasticity-filtered cells: {len(results_plasticity)}")
         print(f"LMI-filtered cells: {len(results_lmi)}")
 
-    # Filter for cells based on USE_SIGMOID_FILTER parameter
+    # === SUMMARY STATISTICS FOR PLASTICITY GROUPS ===
     print("\n" + "="*70)
-    print("APPLYING CELL FILTERS")
+    print("SUMMARY STATISTICS (PLASTICITY GROUPS - SIGMOID VS LINEAR SIGNIFICANT)")
     print("="*70)
-    print(f"\nBefore filtering: {len(results_lmi)} LMI-significant cells")
+
+    print(f"\nTotal sigmoid-significant cells: {len(results_plasticity)}")
+    print(f"  - Potentiation cells (positive amplitude): {len(potentiation)}")
+    print(f"  - Depression cells (negative amplitude): {len(depression)}")
+
+    # By reward group and plasticity group
+    print("\nBy reward group and plasticity group:")
+    for plasticity_group in ['Potentiation', 'Depression']:
+        for group in ['R+', 'R-']:
+            df_subset = results_plasticity[(results_plasticity['plasticity_group'] == plasticity_group) &
+                                           (results_plasticity['reward_group'] == group)]
+            n_subset = len(df_subset)
+            if n_subset > 0:
+                print(f"  {plasticity_group}, {group}: {n_subset} cells")
+
+    # Mean amplitude for plasticity groups
+    if len(results_plasticity) > 0:
+        print(f"\nMean amplitude (plasticity cells, n={len(results_plasticity)}):")
+        for plasticity_group in ['Potentiation', 'Depression']:
+            for group in ['R+', 'R-']:
+                df_subset = results_plasticity[(results_plasticity['plasticity_group'] == plasticity_group) &
+                                              (results_plasticity['reward_group'] == group)]
+                if len(df_subset) > 0:
+                    mean_amp = df_subset['amplitude'].mean()
+                    std_amp = df_subset['amplitude'].std()
+                    print(f"  {plasticity_group}, {group}: {mean_amp:.4f} ± {std_amp:.4f}")
+
+    # === LEGACY: SUMMARY STATISTICS FOR LMI GROUPS ===
+    print("\n" + "="*70)
+    print("SUMMARY STATISTICS (LMI GROUPS - FOR REFERENCE)")
+    print("="*70)
+    print(f"\nLMI-significant cells: {len(results_lmi)}")
 
     n_significant_vs_flat = np.sum(results_lmi['p_value_vs_flat'] < ALPHA)
     n_significant_vs_linear = np.sum(results_lmi['p_value_vs_linear'] < ALPHA)
     print(f"  - Sigmoid vs Flat significant: {n_significant_vs_flat}")
     print(f"  - Sigmoid vs Linear significant: {n_significant_vs_linear}")
 
-    # Apply sigmoid filter if requested
-    if USE_SIGMOID_FILTER:
-        print(f"\nUSE_SIGMOID_FILTER=True: Applying double significance filter")
-        results_lmi_filtered = results_lmi[results_lmi['p_value_vs_linear'] < ALPHA].copy()
-        print(f"After filtering: {len(results_lmi_filtered)} cells with BOTH LMI and Sigmoid vs Linear significance")
-        print(f"  This represents {100*len(results_lmi_filtered)/len(results_lmi):.1f}% of LMI-significant cells")
-        results_lmi = results_lmi_filtered
-    else:
-        print(f"\nUSE_SIGMOID_FILTER=False: Using all LMI-significant cells")
-        print(f"Using {len(results_lmi)} LMI-significant cells for analysis")
-
     # Extract LMI+ and LMI- subsets from results_lmi for summary statistics
     lmi_positive = results_lmi[results_lmi['lmi_sign'] == 'Positive']
     lmi_negative = results_lmi[results_lmi['lmi_sign'] == 'Negative']
 
-    # Quantify proportions
-    print("\n" + "="*70)
-    print("SUMMARY STATISTICS (LMI + SIGMOID VS LINEAR SIGNIFICANT CELLS)")
-    print("="*70)
-
-    n_total = len(results_lmi)
-
-    print(f"\nTotal doubly-significant cells: {n_total}")
     print(f"  - LMI+ cells: {len(lmi_positive)}")
     print(f"  - LMI- cells: {len(lmi_negative)}")
 
@@ -1878,37 +3184,159 @@ def main(run_fitting=RUN_FITTING, generate_pdfs=GENERATE_PDFS):
     print("GENERATING VISUALIZATIONS")
     print("="*70)
 
-    filter_description = "sigmoid-filtered" if USE_SIGMOID_FILTER else "LMI-significant"
-    print(f"Using {filter_description} cells for analysis\n")
+    filter_descriptions = {'vs_linear': 'sigmoid vs linear', 'vs_flat': 'sigmoid vs flat', 'none': 'all sigmoid fits'}
+    print(f"Plasticity filter: {filter_descriptions.get(USE_SIGMOID_FILTER, USE_SIGMOID_FILTER)}\n")
 
     # Plot inflection timing distributions
     plot_inflection_timing_distributions(results_lmi, OUTPUT_DIR, alpha=ALPHA)
 
-    # Plot inflection timing distributions excluding early learners
-    plot_inflection_timing_distributions_late_learners(results_lmi, OUTPUT_DIR, alpha=ALPHA, learning_trial_threshold=20)
+    # # Plot inflection timing distributions excluding early learners
+    # plot_inflection_timing_distributions_late_learners(results_lmi, OUTPUT_DIR, alpha=ALPHA, learning_trial_threshold=20)
 
-    # Compute and plot pre/post inflection analysis
-    if len(results_lmi) > 0:
+    # === PRE/POST INFLECTION ANALYSIS: PLASTICITY GROUPS ===
+    if len(results_plasticity) > 0:
         print("\n" + "="*70)
-        print("PRE/POST INFLECTION ANALYSIS")
+        print("PRE/POST INFLECTION ANALYSIS - PLASTICITY GROUPS")
         print("="*70)
 
-        psth_df, response_df = compute_pre_post_inflection_psth(
+        psth_df_plasticity, response_df_plasticity = compute_pre_post_inflection_psth(
+            results_plasticity,
+            response_win=RESPONSE_WIN,
+            min_trials_per_period=3,
+            psth_win=PSTH_WIN,
+            n_jobs=N_CORES,  # Use parallel processing across mice
+            group_column='plasticity_group'
+        )
+
+        if len(psth_df_plasticity) > 0 and len(response_df_plasticity) > 0:
+            # Generate both versions: cells and mice level
+            plot_pre_post_inflection_psth_and_responses(
+                psth_df_plasticity, response_df_plasticity, OUTPUT_DIR,
+                stat_level='cells',
+                group_column='plasticity_group',
+                group_values=['Potentiation', 'Depression'],
+                filename_suffix='plasticity'
+            )
+            plot_pre_post_inflection_psth_and_responses(
+                psth_df_plasticity, response_df_plasticity, OUTPUT_DIR,
+                stat_level='mice',
+                group_column='plasticity_group',
+                group_values=['Potentiation', 'Depression'],
+                filename_suffix='plasticity'
+            )
+
+            # === NEW: LMI DISTRIBUTION WITHIN PLASTICITY GROUPS ===
+            print("\n" + "="*70)
+            print("LMI DISTRIBUTION WITHIN PLASTICITY GROUPS")
+            print("="*70)
+            plot_lmi_distribution_in_plasticity_groups(
+                potentiation,
+                depression,
+                OUTPUT_DIR
+            )
+
+            # === NEW: PLASTICITY DISTRIBUTION WITHIN LMI GROUPS (INVERSE) ===
+            print("\n" + "="*70)
+            print("PLASTICITY DISTRIBUTION WITHIN LMI GROUPS")
+            print("="*70)
+            plot_plasticity_distribution_in_lmi_groups(
+                results_plasticity,
+                OUTPUT_DIR
+            )
+        else:
+            print("  WARNING: No data available for pre/post inflection analysis")
+    else:
+        print("\n  WARNING: No plasticity cells available for analysis")
+
+    # === LEGACY: PRE/POST INFLECTION ANALYSIS FOR LMI GROUPS ===
+    # (Kept for reference and comparison)
+    if len(results_lmi) > 0:
+        print("\n" + "="*70)
+        print("PRE/POST INFLECTION ANALYSIS - LMI GROUPS (LEGACY)")
+        print("="*70)
+
+        psth_df_lmi, response_df_lmi = compute_pre_post_inflection_psth(
             results_lmi,
             response_win=RESPONSE_WIN,
             min_trials_per_period=3,
             psth_win=PSTH_WIN,
-            n_jobs=N_CORES  # Use parallel processing across mice
+            n_jobs=N_CORES,  # Use parallel processing across mice
+            group_column='lmi_sign'
         )
 
-        if len(psth_df) > 0 and len(response_df) > 0:
+        if len(psth_df_lmi) > 0 and len(response_df_lmi) > 0:
             # Generate both versions: cells and mice level
-            plot_pre_post_inflection_psth_and_responses(psth_df, response_df, OUTPUT_DIR, stat_level='cells')
-            plot_pre_post_inflection_psth_and_responses(psth_df, response_df, OUTPUT_DIR, stat_level='mice')
+            plot_pre_post_inflection_psth_and_responses(
+                psth_df_lmi, response_df_lmi, OUTPUT_DIR,
+                stat_level='cells',
+                group_column='lmi_sign',
+                group_values=['Positive', 'Negative'],
+                filename_suffix='lmi'
+            )
+            plot_pre_post_inflection_psth_and_responses(
+                psth_df_lmi, response_df_lmi, OUTPUT_DIR,
+                stat_level='mice',
+                group_column='lmi_sign',
+                group_values=['Positive', 'Negative'],
+                filename_suffix='lmi'
+            )
+
+            # LMI vs plasticity scatter
+            print("\n" + "="*70)
+            print("LMI VS PLASTICITY SCATTER")
+            print("="*70)
+            plot_lmi_vs_plasticity_scatter(results_lmi, response_df_lmi, OUTPUT_DIR)
+
+            # --- participation-rate coloured variant ---
+            participation_csv = os.path.join(
+                REACTIVATION_OUTPUT_DIR, 'cell_participation_rates_aggregated.csv'
+            )
+            if os.path.exists(participation_csv):
+                participation_df = pd.read_csv(participation_csv)
+                print(f"\n  Loaded participation rates: {len(participation_df)} cells "
+                      f"from {participation_csv}")
+                plot_lmi_vs_plasticity_scatter_participation(
+                    results_lmi, response_df_lmi, participation_df, OUTPUT_DIR
+                )
+                plot_participation_rate_by_lmi_plasticity_groups(
+                    results_lmi, response_df_lmi, participation_df, OUTPUT_DIR
+                )
+
+                # --- Load before/after inflection participation rates ---
+                participation_inflection_csv = os.path.join(
+                    REACTIVATION_OUTPUT_DIR, 'cell_participation_rates_by_inflection.csv'
+                )
+
+                if os.path.exists(participation_inflection_csv):
+                    participation_inflection_df = pd.read_csv(participation_inflection_csv)
+                    print(f"\n  Loaded before/after inflection participation: {len(participation_inflection_df)} cells")
+
+                    # Plot: before inflection
+                    plot_lmi_vs_plasticity_scatter_participation_by_inflection(
+                        results_lmi, response_df_lmi, participation_inflection_df, OUTPUT_DIR,
+                        inflection_phase='before'
+                    )
+
+                    # Plot: after inflection
+                    plot_lmi_vs_plasticity_scatter_participation_by_inflection(
+                        results_lmi, response_df_lmi, participation_inflection_df, OUTPUT_DIR,
+                        inflection_phase='after'
+                    )
+
+                    # Plot: barplots for before/after inflection by LMI × plasticity groups
+                    plot_participation_rate_before_after_inflection_by_groups(
+                        results_lmi, response_df_lmi, participation_inflection_df, OUTPUT_DIR
+                    )
+                else:
+                    print(f"\n  WARNING: Before/after inflection CSV not found at {participation_inflection_csv}")
+                    print("  Run reactivation_lmi_prediction.py with updated code first.")
+            else:
+                print(f"\n  WARNING: Participation CSV not found at {participation_csv} "
+                      f"— skipping participation scatter. Run reactivation_lmi_prediction.py first.")
         else:
-            print("  WARNING: No data available for pre/post inflection analysis")
+            print("  WARNING: No data available for LMI-based pre/post inflection analysis")
     else:
-        print("\n  WARNING: No cells available for analysis")
+        print("\n  WARNING: No LMI cells available for analysis")
 
     # Generate example cell plasticity plot
     if len(results_lmi) > 0:
@@ -1928,13 +3356,24 @@ def main(run_fitting=RUN_FITTING, generate_pdfs=GENERATE_PDFS):
         print(f"\n  Found {len(results_lmi)} filtered cells")
         print(f"  Generating PDF for top 50 cells sorted by LMI (descending)...")
 
-        # Sort by LMI in descending order
-        results_lmi_sorted = results_lmi.sort_values('lmi', ascending=False)
+        # # Sort by LMI in descending order
+        # results_lmi_sorted = results_lmi.sort_values('lmi', ascending=False)
+
+        # create_cell_pdf_report(
+        #     results_lmi_sorted, OUTPUT_DIR,
+        #     'plasticity_cells_top50_by_positive_lmi.pdf',
+        #     n_cells=50,
+        #     sort_by='lmi'
+        # )
+    
+        # Same for negative cells.
+        # Sort by LMI in ascending order
+        results_lmi_sorted = results_lmi.sort_values('lmi', ascending=True)
 
         create_cell_pdf_report(
             results_lmi_sorted, OUTPUT_DIR,
-            'plasticity_cells_top100_by_lmi.pdf',
-            n_cells=100,
+            'plasticity_cells_top50_by_negative_lmi.pdf',
+            n_cells=50,
             sort_by='lmi'
         )
     elif generate_pdfs:

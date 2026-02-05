@@ -123,7 +123,7 @@ print(f"Found {len(r_minus_mice)} R- mice: {r_minus_mice}")
 # CORE FUNCTIONS
 # =============================================================================
 
-def extract_event_responses(mouse, day, verbose=True, threshold_dict=None):
+def extract_event_responses(mouse, day, verbose=True, threshold_dict=None, inflection_points=None):
     """
     Extract cell responses around reactivation events for a single mouse and day.
 
@@ -138,11 +138,16 @@ def extract_event_responses(mouse, day, verbose=True, threshold_dict=None):
     threshold_dict : dict, optional
         Per-mouse, per-day thresholds from surrogate analysis.
         If None, uses global threshold_corr parameter.
+    inflection_points : dict, optional
+        Dictionary mapping (mouse_id, roi) to inflection trial_w value (1-indexed).
+        If provided and day==0, adds 'inflection_phase' column to responses_df
+        with values: 'before', 'after', 'at_inflection', or 'unknown'.
 
     Returns
     -------
     responses_df : pd.DataFrame
         Columns: mouse_id, day, roi, event_idx, avg_response, participates
+        (and inflection_phase if inflection_points provided and day==0)
         Each row is one cell's response to one event
     n_events : int
         Total number of events detected
@@ -164,6 +169,12 @@ def extract_event_responses(mouse, day, verbose=True, threshold_dict=None):
 
         # Select no_stim trials only
         nostim_trials = xarray_day.sel(trial=xarray_day['no_stim'] == 1)
+
+        # For day 0 with inflection points, load whisker trials to map inflection to global trial_id
+        whisker_trial_ids = None
+        if day == 0 and inflection_points is not None:
+            whisker_trials = xarray_day.sel(trial=xarray_day['whisker_stim'] == 1)
+            whisker_trial_ids = whisker_trials['trial_id'].values
 
         n_nostim_trials = len(nostim_trials.trial)
         if verbose:
@@ -225,15 +236,37 @@ def extract_event_responses(mouse, day, verbose=True, threshold_dict=None):
             # Determine participation (response >= threshold)
             participates = avg_response >= participation_threshold
 
+            # Get global trial_id for this event (for inflection phase determination)
+            event_trial_id = nostim_trials['trial_id'].values[trial_idx]
+
             # Store results for each cell
             for icell in range(n_cells):
+                roi = roi_list[icell]
+
+                # Determine inflection phase
+                inflection_phase = 'unknown'
+                if whisker_trial_ids is not None and (mouse, roi) in inflection_points:
+                    inflection_trial_w = inflection_points[(mouse, roi)]
+
+                    # Get global trial_id of the Nth whisker trial (trial_w is 1-indexed)
+                    if 1 <= inflection_trial_w <= len(whisker_trial_ids):
+                        inflection_trial_id = whisker_trial_ids[int(inflection_trial_w - 1)]
+
+                        if event_trial_id < inflection_trial_id:
+                            inflection_phase = 'before'
+                        elif event_trial_id > inflection_trial_id:
+                            inflection_phase = 'after'
+                        else:
+                            inflection_phase = 'at_inflection'
+
                 responses_list.append({
                     'mouse_id': mouse,
                     'day': day,
-                    'roi': roi_list[icell],
+                    'roi': roi,
                     'event_idx': event_idx,
                     'avg_response': avg_response[icell],
-                    'participates': participates[icell]
+                    'participates': participates[icell],
+                    'inflection_phase': inflection_phase
                 })
 
         responses_df = pd.DataFrame(responses_list)
@@ -281,6 +314,90 @@ def compute_participation_rate(responses_df):
     grouped['reliable'] = grouped['n_events'] >= min_events_for_reliability
 
     return grouped
+
+
+def compute_participation_rate_by_inflection(responses_df):
+    """
+    Compute participation rates separately for before and after inflection.
+
+    Requires responses_df to have 'inflection_phase' column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: mouse_id, roi, participation_rate_before, participation_rate_after,
+                 n_events_before, n_events_after, reliable_before, reliable_after
+    """
+    if responses_df is None or len(responses_df) == 0:
+        return None
+
+    results = []
+
+    for (mouse_id, roi), group in responses_df.groupby(['mouse_id', 'roi']):
+        before = group[group['inflection_phase'] == 'before']
+        after = group[group['inflection_phase'] == 'after']
+
+        # Compute rates and counts
+        n_before = len(before)
+        n_after = len(after)
+
+        rate_before = before['participates'].mean() if n_before > 0 else np.nan
+        rate_after = after['participates'].mean() if n_after > 0 else np.nan
+
+        results.append({
+            'mouse_id': mouse_id,
+            'roi': roi,
+            'participation_rate_before': rate_before,
+            'participation_rate_after': rate_after,
+            'n_events_before': n_before,
+            'n_events_after': n_after,
+            'reliable_before': n_before >= min_events_for_reliability,
+            'reliable_after': n_after >= min_events_for_reliability
+        })
+
+    return pd.DataFrame(results)
+
+
+def analyze_mouse_participation_by_inflection(mouse, inflection_points, threshold_dict=None, verbose=False):
+    """
+    Analyze participation rates before and after inflection on day 0.
+
+    Parameters
+    ----------
+    mouse : str
+        Mouse ID
+    inflection_points : dict
+        Mapping (mouse_id, roi) -> inflection_trial_w (1-indexed whisker trial number)
+    threshold_dict : dict, optional
+        Thresholds for event detection (from surrogate analysis)
+    verbose : bool
+
+    Returns
+    -------
+    pd.DataFrame or None
+        Participation rates before/after inflection for this mouse
+    """
+    if verbose:
+        print(f"\n  Processing {mouse} for before/after inflection analysis...")
+
+    # Extract responses for day 0 with inflection phase tracking
+    responses_df, n_events = extract_event_responses(
+        mouse, day=0, threshold_dict=threshold_dict, verbose=verbose,
+        inflection_points=inflection_points
+    )
+
+    if responses_df is None or len(responses_df) == 0:
+        if verbose:
+            print(f"    No events detected for {mouse}")
+        return None
+
+    # Compute participation rates by inflection phase
+    participation_df = compute_participation_rate_by_inflection(responses_df)
+
+    if verbose and participation_df is not None:
+        print(f"    Computed before/after rates for {len(participation_df)} cells")
+
+    return participation_df
 
 
 def aggregate_across_days(participation_df_all):
@@ -1002,6 +1119,65 @@ if __name__ == "__main__":
     csv_path = os.path.join(output_dir, 'participation_lmi_merged.csv')
     merged_df.to_csv(csv_path, index=False)
     print(f"Saved merged data to: {csv_path}")
+
+    # === BEFORE/AFTER INFLECTION ANALYSIS (DAY 0 ONLY) ===
+    print("\n" + "="*60)
+    print("PARTICIPATION RATES: BEFORE vs AFTER INFLECTION (DAY 0)")
+    print("="*60)
+
+    # Load inflection points from plasticity results (LMI cells)
+    plasticity_csv = os.path.join(
+        io.adjust_path_to_host(
+            '/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/day0_learning/plasticity'
+        ),
+        'plasticity_results_lmi_cells.csv'
+    )
+
+    if not os.path.exists(plasticity_csv):
+        print(f"\n  WARNING: Plasticity results not found at {plasticity_csv}")
+        print("  Skipping before/after inflection analysis. Run lmi_plasticity.py first.")
+    else:
+        plasticity_df = pd.read_csv(plasticity_csv)
+
+        # Create inflection dict: (mouse_id, roi) -> inflection_trial_w
+        inflection_dict = {
+            (row['mouse_id'], row['roi']): row['inflection']
+            for _, row in plasticity_df.iterrows()
+            if not pd.isna(row['inflection'])
+        }
+
+        print(f"\n  Loaded {len(inflection_dict)} cells with inflection points")
+
+        # Process all mice for before/after inflection analysis
+        print(f"\n  Processing {len(all_mice_to_process)} mice in parallel...")
+
+        results_inflection = Parallel(n_jobs=n_jobs, verbose=10)(
+            delayed(analyze_mouse_participation_by_inflection)(
+                mouse, inflection_dict, threshold_dict=threshold_dict, verbose=False
+            )
+            for mouse in all_mice_to_process
+        )
+
+        # Combine results
+        inflection_data = [r for r in results_inflection if r is not None and len(r) > 0]
+
+        if len(inflection_data) == 0:
+            print("\n  ERROR: No valid before/after inflection data collected!")
+        else:
+            inflection_participation_df = pd.concat(inflection_data, ignore_index=True)
+            print(f"\n  Collected before/after data: {len(inflection_participation_df)} cells")
+
+            # Print summary
+            n_both_reliable = (
+                (inflection_participation_df['reliable_before']) &
+                (inflection_participation_df['reliable_after'])
+            ).sum()
+            print(f"  Cells with reliable data both before and after: {n_both_reliable}")
+
+            # Save
+            csv_path = os.path.join(output_dir, 'cell_participation_rates_by_inflection.csv')
+            inflection_participation_df.to_csv(csv_path, index=False)
+            print(f"\n  Saved before/after inflection rates to: {csv_path}")
 
     # Compute correlations for different participation metrics
     print("\n" + "="*60)

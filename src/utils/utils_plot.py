@@ -13,9 +13,12 @@ sns.set_theme(
         'pdf.fonttype': 42,
         'ps.fonttype': 42,
         'svg.fonttype': 'none',  # Ensures text is editable in SVGs
+        # 'svg.embed_char_paths': False,
         'axes.linewidth': 0.8,
         'xtick.major.width': 0.8,
         'ytick.major.width': 0.8,
+        'xtick.minor.width': 0.8,
+        'ytick.minor.width': 0.8,
         'xtick.major.size': 3,
         'ytick.major.size': 3,
         # Font sizes
