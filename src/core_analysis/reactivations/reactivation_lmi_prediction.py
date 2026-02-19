@@ -29,9 +29,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
-from scipy.stats import spearmanr, pearsonr
+from scipy.stats import spearmanr, pearsonr, ttest_rel
 from scipy import stats
 from statsmodels.stats.multitest import multipletests
+from statsmodels.stats.anova import AnovaRM
 from joblib import Parallel, delayed
 import warnings
 
@@ -57,11 +58,14 @@ win = (0, 0.300)  # Window for template (matches reactivation.py)
 days = [-2, -1, 0, 1, 2]
 days_str = ['-2', '-1', '0', '+1', '+2']
 n_map_trials = 40  # Number of mapping trials for template
+threshold_dff = None  # dF/F threshold for cells included in template (None = all cells)
+min_event_distance_ms = 150  # Minimum distance between events (ms)
+min_event_distance_frames = int(min_event_distance_ms / 1000 * sampling_rate)
 
 # Participation parameters
 event_window_ms = 150  # ±150ms around event (total 300ms)
 event_window_frames = int(event_window_ms / 1000 * sampling_rate)  # ±5 frames
-participation_threshold = 0.05  # 5% dF/F for participation
+participation_threshold = 0.10  # 5% dF/F for participation
 min_events_for_reliability = 5  # Flag estimates based on < 5 events
 
 # LMI thresholds (matches characterize_LMI_cells.py)
@@ -77,9 +81,19 @@ alpha_fdr = 0.05  # FDR correction level
 # Visualization
 sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1)
 
-# Path to saved reactivation results
+# Path to saved reactivation results — must match what was used in reactivation.py
+# percentile_to_use: 95, 99, or 99.9  (selects the corresponding pkl file)
+percentile_to_use = 99
+
+# Surrogate threshold parameters (only used as fallback if preloaded events are missing)
+use_surrogate_thresholds = True
+threshold_mode  = 'day'      # 'mouse' or 'day'
+threshold_type  = 'percentile'
+threshold_corr  = 0.45       # fallback fixed threshold
+
 save_dir = os.path.join(io.results_dir, 'reactivation')
-reactivation_results_file = os.path.join(save_dir, 'reactivation_results.pkl')
+_p_str = str(int(percentile_to_use)) if percentile_to_use == int(percentile_to_use) else str(int(percentile_to_use * 10))
+reactivation_results_file = os.path.join(save_dir, f'reactivation_results_p{_p_str}.pkl')
 
 # Load database
 _, _, all_mice, db = io.select_sessions_from_db(
@@ -224,7 +238,7 @@ def extract_event_responses(mouse, day, verbose=True, threshold_dict=None, infle
                 print(f"    Using pre-computed events from reactivation.py: {len(events)} events")
         else:
             # Fallback: detect events (for backwards compatibility)
-            current_threshold = get_threshold_for_mouse_day(threshold_dict, mouse, day, threshold_corr, threshold_mode)
+            current_threshold = get_threshold_for_mouse_day(threshold_dict, mouse, day, threshold_corr)
             if verbose:
                 if threshold_dict is not None:
                     print(f"    Using threshold: {current_threshold:.4f} (surrogate-based, {threshold_mode} mode)")
@@ -769,7 +783,7 @@ def process_single_mouse(mouse, days, verbose=False, threshold_dict=None, preloa
 # =============================================================================
 
 def plot_participation_rate_vs_lmi(merged_df, participation_metric='learning_rate',
-                                    significant_only=False, save_path=None):
+                                    save_path=None):
     """
     Create scatter plots of participation rate (y) vs LMI (x) for R+ and R-.
 
@@ -781,8 +795,6 @@ def plot_participation_rate_vs_lmi(merged_df, participation_metric='learning_rat
         Merged participation and LMI data
     participation_metric : str
         Which participation metric to use
-    significant_only : bool
-        If True, only include cells with significant LMI (lmi_p >= 0.975 or <= 0.025)
     save_path : str
         Path to save figure
     """
@@ -795,12 +807,6 @@ def plot_participation_rate_vs_lmi(merged_df, participation_metric='learning_rat
 
         # Filter data for this reward group
         mask = (merged_df['reward_group'] == reward_group)
-
-        # Filter for significant LMI cells if requested
-        if significant_only:
-            mask &= ((merged_df['lmi_p'] >= LMI_POSITIVE_THRESHOLD) |
-                    (merged_df['lmi_p'] <= LMI_NEGATIVE_THRESHOLD))
-
         group_data = merged_df[mask]
 
         # Remove NaN values
@@ -813,8 +819,7 @@ def plot_participation_rate_vs_lmi(merged_df, participation_metric='learning_rat
                    ha='center', va='center', transform=ax.transAxes, fontsize=12)
             ax.set_xlabel('LMI', fontweight='bold')
             ax.set_ylabel('Participation Rate (Day 0)', fontweight='bold')
-            title_suffix = ' (Significant LMI only)' if significant_only else ''
-            ax.set_title(f'{reward_group}{title_suffix}', fontweight='bold', fontsize=14)
+            ax.set_title(f'{reward_group}', fontweight='bold', fontsize=14)
             continue
 
         # Scatter plot
@@ -852,18 +857,242 @@ def plot_participation_rate_vs_lmi(merged_df, participation_metric='learning_rat
 
         ax.set_xlabel('LMI', fontweight='bold', fontsize=12)
         ax.set_ylabel('Participation Rate (Day 0)', fontweight='bold', fontsize=12)
-        title_suffix = ' (Significant LMI only)' if significant_only else ''
-        ax.set_title(f'{reward_group}{title_suffix}', fontweight='bold', fontsize=14)
+        ax.set_title(f'{reward_group}', fontweight='bold', fontsize=14)
         ax.set_xlim(-1.1, 1.1)
         ax.set_ylim(-.1, 1.1)
-        ax.grid(True, alpha=0.3)    
+        ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
     if save_path:
         plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
-        plt.close()
         print(f"  Saved to: {save_path}")
+
+        # Save data CSV
+        data_csv = save_path.replace('.svg', '_data.csv')
+        data_export = merged_df[['mouse_id', 'roi', 'reward_group', 'lmi', 'lmi_p',
+                                  'lmi_category', participation_metric]].copy()
+        data_export = data_export.dropna(subset=['lmi', participation_metric])
+        data_export.to_csv(data_csv, index=False)
+        print(f"  Data CSV saved: {data_csv}")
+
+        # Save statistics CSV (correlation stats for each group)
+        stats_csv = save_path.replace('.svg', '_stats.csv')
+        stats_list = []
+
+        for reward_group in ['R+', 'R-']:
+            mask = (merged_df['reward_group'] == reward_group)
+            group_data = merged_df[mask]
+            valid_mask = ~(group_data['lmi'].isna() | group_data[participation_metric].isna())
+            x = group_data.loc[valid_mask, 'lmi'].values
+            y = group_data.loc[valid_mask, participation_metric].values
+
+            if len(x) >= 3:
+                pearson_r, pearson_p = pearsonr(x, y)
+                slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+
+                significance = ""
+                if pearson_p < 0.001:
+                    significance = "***"
+                elif pearson_p < 0.01:
+                    significance = "**"
+                elif pearson_p < 0.05:
+                    significance = "*"
+                else:
+                    significance = "ns"
+
+                stats_list.append({
+                    'reward_group': reward_group,
+                    'n_cells': len(x),
+                    'pearson_r': pearson_r,
+                    'p_value': pearson_p,
+                    'significance': significance,
+                    'slope': slope,
+                    'intercept': intercept,
+                    'r_squared': r_value**2,
+                    'std_err': std_err,
+                    'test': 'Pearson correlation',
+                })
+            else:
+                stats_list.append({
+                    'reward_group': reward_group,
+                    'n_cells': len(x),
+                    'pearson_r': np.nan,
+                    'p_value': np.nan,
+                    'significance': 'insufficient data',
+                    'slope': np.nan,
+                    'intercept': np.nan,
+                    'r_squared': np.nan,
+                    'std_err': np.nan,
+                    'test': 'insufficient data',
+                })
+
+        stats_df = pd.DataFrame(stats_list)
+        stats_df.to_csv(stats_csv, index=False)
+        print(f"  Stats CSV saved: {stats_csv}")
+
+        plt.close()
+    else:
+        return fig
+
+
+def plot_participation_rate_vs_lmi_histogram(merged_df, participation_metric='learning_rate',
+                                               save_path=None):
+    """
+    Create histograms of participation rate (y) vs LMI (x) for R+ and R-.
+
+    Bins LMI into 0.2-width bins and shows mean participation rate per bin.
+    Alternative visualization to the scatter plot.
+
+    Parameters
+    ----------
+    merged_df : pd.DataFrame
+        Merged participation and LMI data
+    participation_metric : str
+        Which participation metric to use
+    save_path : str
+        Path to save figure
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    reward_groups = ['R+', 'R-']
+    group_colors = {'R+': reward_palette[1], 'R-': reward_palette[0]}
+
+    # Define LMI bins with 0.2 width
+    lmi_bins = np.arange(-1.0, 1.2, 0.2)
+    bin_centers = lmi_bins[:-1] + 0.1
+    bin_labels = [f'{bc:.1f}' for bc in bin_centers]
+
+    for i, reward_group in enumerate(reward_groups):
+        ax = axes[i]
+
+        mask = (merged_df['reward_group'] == reward_group)
+        group_data = merged_df[mask].dropna(subset=['lmi', participation_metric]).copy()
+
+        if len(group_data) < 3:
+            ax.text(0.5, 0.5, f'Insufficient data\n(n={len(group_data)})',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=12)
+            ax.set_xlabel('LMI', fontweight='bold')
+            ax.set_ylabel('Mean Participation Rate (Day 0)', fontweight='bold')
+            ax.set_title(f'{reward_group}', fontweight='bold', fontsize=14)
+            continue
+
+        group_data['lmi_bin'] = pd.cut(
+            group_data['lmi'], bins=lmi_bins, labels=bin_labels, include_lowest=True
+        )
+
+        sns.barplot(
+            data=group_data, x='lmi_bin', y=participation_metric,
+            color=group_colors[reward_group], errorbar='ci', ax=ax,
+            alpha=0.8, edgecolor='black', linewidth=0.8
+        )
+
+        # Pearson correlation on unbinned data
+        x = group_data['lmi'].values
+        y = group_data[participation_metric].values
+        pearson_r, pearson_p = pearsonr(x, y)
+
+        if pearson_p < 0.001:
+            p_str = 'p < 0.001 ***'
+        elif pearson_p < 0.01:
+            p_str = f'p = {pearson_p:.3f} **'
+        elif pearson_p < 0.05:
+            p_str = f'p = {pearson_p:.3f} *'
+        else:
+            p_str = f'p = {pearson_p:.3f} ns'
+
+        stats_text = f'n = {len(x)} cells\nPearson r = {pearson_r:.3f}\n{p_str}'
+        ax.text(0.05, 0.95, stats_text, transform=ax.transAxes,
+               fontsize=10, verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
+
+        ax.set_xlabel('LMI', fontweight='bold', fontsize=12)
+        ax.set_ylabel('Mean Participation Rate (Day 0)', fontweight='bold', fontsize=12)
+        ax.set_title(f'{reward_group}', fontweight='bold', fontsize=14)
+        ax.tick_params(axis='x', rotation=45)
+        ax.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
+        print(f"  Saved to: {save_path}")
+
+        # Save binned data CSV
+        data_csv = save_path.replace('.svg', '_data.csv')
+        binned_data_list = []
+
+        for reward_group in ['R+', 'R-']:
+            mask = (merged_df['reward_group'] == reward_group)
+            gd = merged_df[mask].dropna(subset=['lmi', participation_metric]).copy()
+            gd['lmi_bin'] = pd.cut(gd['lmi'], bins=lmi_bins, labels=bin_labels, include_lowest=True)
+
+            for bin_idx, (bin_label, bin_center) in enumerate(zip(bin_labels, bin_centers)):
+                bin_values = gd.loc[gd['lmi_bin'] == bin_label, participation_metric].values
+                if len(bin_values) > 0:
+                    binned_data_list.append({
+                        'reward_group': reward_group,
+                        'lmi_bin_min': lmi_bins[bin_idx],
+                        'lmi_bin_max': lmi_bins[bin_idx + 1],
+                        'lmi_bin_center': bin_center,
+                        'mean_participation_rate': np.mean(bin_values),
+                        'sem_participation_rate': np.std(bin_values, ddof=1) / np.sqrt(len(bin_values)),
+                        'n_cells': len(bin_values)
+                    })
+
+        binned_data_df = pd.DataFrame(binned_data_list)
+        binned_data_df.to_csv(data_csv, index=False)
+        print(f"  Data CSV saved: {data_csv}")
+
+        # Save statistics CSV (overall Pearson correlation on unbinned data)
+        stats_csv = save_path.replace('.svg', '_stats.csv')
+        stats_list = []
+
+        for reward_group in ['R+', 'R-']:
+            mask = (merged_df['reward_group'] == reward_group)
+            group_data = merged_df[mask]
+            valid_mask = ~(group_data['lmi'].isna() | group_data[participation_metric].isna())
+            x = group_data.loc[valid_mask, 'lmi'].values
+            y = group_data.loc[valid_mask, participation_metric].values
+
+            if len(x) >= 3:
+                pearson_r, pearson_p = pearsonr(x, y)
+
+                significance = ""
+                if pearson_p < 0.001:
+                    significance = "***"
+                elif pearson_p < 0.01:
+                    significance = "**"
+                elif pearson_p < 0.05:
+                    significance = "*"
+                else:
+                    significance = "ns"
+
+                stats_list.append({
+                    'reward_group': reward_group,
+                    'n_cells': len(x),
+                    'pearson_r': pearson_r,
+                    'p_value': pearson_p,
+                    'significance': significance,
+                    'test': 'Pearson correlation',
+                    'note': 'correlation on unbinned data'
+                })
+            else:
+                stats_list.append({
+                    'reward_group': reward_group,
+                    'n_cells': len(x),
+                    'pearson_r': np.nan,
+                    'p_value': np.nan,
+                    'significance': 'insufficient data',
+                    'test': 'insufficient data',
+                    'note': 'correlation on unbinned data'
+                })
+
+        stats_df = pd.DataFrame(stats_list)
+        stats_df.to_csv(stats_csv, index=False)
+        print(f"  Stats CSV saved: {stats_csv}")
+
+        plt.close()
     else:
         return fig
 
@@ -873,10 +1102,9 @@ def plot_temporal_evolution(merged_df, participation_df_all, save_path=None):
     Plot participation rates across days for LMI+ vs LMI- cells.
 
     Barplot showing per-mouse averages across days, with lines connecting
-    individual mice. Separate panels for R+ and R-. Includes paired Wilcoxon
-    test for LMI+ vs LMI- at each day.
+    individual mice. Separate panels for R+ and R-. Includes 2-way repeated
+    measures ANOVA (days × LMI category) with FDR-corrected posthoc tests.
     """
-    from scipy.stats import wilcoxon
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
@@ -952,9 +1180,98 @@ def plot_temporal_evolution(merged_df, participation_df_all, save_path=None):
 
         plot_df = pd.concat(all_data, ignore_index=True)
 
-        # Perform paired Wilcoxon test for each day
-        print(f"\n  {reward_group} - Paired Wilcoxon tests (LMI+ vs LMI-):")
-        wilcoxon_results = {}
+        # =====================================================================
+        # 2-WAY REPEATED MEASURES ANOVA: days × LMI category
+        # =====================================================================
+        print(f"\n  {reward_group} - Statistical Analysis:")
+        print("  " + "-" * 56)
+
+        # Check if we have data for both LMI categories
+        has_both_categories = (not df_pos.empty) and (not df_neg.empty)
+
+        if has_both_categories:
+            # Find mice that have data for both LMI+ and LMI- cells
+            mice_pos = set(df_pos['mouse_id'].unique())
+            mice_neg = set(df_neg['mouse_id'].unique())
+            mice_both = mice_pos & mice_neg
+
+            if len(mice_both) >= 3:
+                print(f"  Running 2-way repeated measures ANOVA (n={len(mice_both)} mice)")
+
+                # Prepare data for ANOVA: need long format with factors
+                # Subject: mouse_id, Within-subject factors: day, lmi_category
+                anova_data = []
+                for mouse_id in sorted(mice_both):
+                    for day in days:
+                        for lmi_cat in ['positive', 'negative']:
+                            # Get data for this mouse-day-category
+                            if lmi_cat == 'positive':
+                                cat_df = df_pos
+                            else:
+                                cat_df = df_neg
+
+                            mouse_day_data = cat_df[(cat_df['mouse_id'] == mouse_id) &
+                                                     (cat_df['day'] == day)]
+
+                            if len(mouse_day_data) > 0:
+                                rate = mouse_day_data['participation_rate'].values[0]
+                                anova_data.append({
+                                    'mouse_id': mouse_id,
+                                    'day': day,
+                                    'lmi_category': lmi_cat,
+                                    'participation_rate': rate
+                                })
+
+                df_anova = pd.DataFrame(anova_data)
+
+                # Run 2-way repeated measures ANOVA
+                try:
+                    aovrm = AnovaRM(df_anova, 'participation_rate', 'mouse_id',
+                                   within=['day', 'lmi_category'])
+                    anova_results = aovrm.fit()
+
+                    print("\n  ANOVA Results:")
+                    print(anova_results.summary())
+
+                    # Extract F-statistics and p-values
+                    anova_table = anova_results.anova_table
+                    day_effect_p = anova_table.loc['day', 'Pr > F']
+                    lmi_effect_p = anova_table.loc['lmi_category', 'Pr > F']
+                    interaction_p = anova_table.loc['day:lmi_category', 'Pr > F']
+
+                    print(f"\n  Main effect of Day: p = {day_effect_p:.4f}")
+                    print(f"  Main effect of LMI category: p = {lmi_effect_p:.4f}")
+                    print(f"  Interaction (Day × LMI): p = {interaction_p:.4f}")
+
+                    # Save ANOVA results to CSV
+                    if save_path:
+                        anova_csv = save_path.replace('.svg', f'_{reward_group.replace("+", "plus").replace("-", "minus")}_anova.csv')
+                        anova_table.to_csv(anova_csv)
+                        print(f"\n  Saved ANOVA table: {anova_csv}")
+
+                except Exception as e:
+                    print(f"\n  ANOVA failed: {e}")
+                    print("  Falling back to paired t-tests per day")
+                    anova_results = None
+                    interaction_p = np.nan
+            else:
+                print(f"  Insufficient mice with both LMI+ and LMI- cells (n={len(mice_both)})")
+                anova_results = None
+                interaction_p = np.nan
+        else:
+            print("  Only one LMI category present - skipping ANOVA")
+            anova_results = None
+            interaction_p = np.nan
+
+        # =====================================================================
+        # POSTHOC TESTS: Paired t-tests per day with FDR correction
+        # =====================================================================
+        print(f"\n  Posthoc tests (LMI+ vs LMI- per day, FDR-corrected):")
+
+        posthoc_results = {}
+        p_values_all_days = []
+        days_with_tests = []
+
         for day in days:
             # Get data for both LMI categories for this day
             pos_day = df_pos[df_pos['day'] == day]
@@ -975,18 +1292,53 @@ def plot_temporal_evolution(merged_df, participation_df_all, save_path=None):
                     pos_values.append(pos_val)
                     neg_values.append(neg_val)
 
-                # Wilcoxon signed-rank test
+                # Paired t-test
                 try:
-                    stat, p_val = wilcoxon(pos_values, neg_values)
-                    wilcoxon_results[day] = p_val
-                    sig_marker = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
-                    print(f"    Day {day:+2d}: n={len(mice_both)} mice, p={p_val:.4f} {sig_marker}")
-                except:
-                    print(f"    Day {day:+2d}: Test failed (likely all pairs identical)")
-                    wilcoxon_results[day] = np.nan
+                    t_stat, p_val = ttest_rel(pos_values, neg_values)
+                    p_values_all_days.append(p_val)
+                    days_with_tests.append(day)
+                    posthoc_results[day] = {'p_uncorrected': p_val, 'n_mice': len(mice_both)}
+                except Exception as e:
+                    print(f"    Day {day:+2d}: Test failed - {e}")
+                    posthoc_results[day] = {'p_uncorrected': np.nan, 'n_mice': len(mice_both)}
             else:
-                print(f"    Day {day:+2d}: Insufficient paired data (n={len(mice_both)} mice)")
-                wilcoxon_results[day] = np.nan
+                posthoc_results[day] = {'p_uncorrected': np.nan, 'n_mice': len(mice_both)}
+
+        # Apply FDR correction (Benjamini-Hochberg)
+        if len(p_values_all_days) > 0:
+            reject, p_corrected, _, _ = multipletests(p_values_all_days, method='fdr_bh')
+
+            # Update results with corrected p-values
+            for idx, day in enumerate(days_with_tests):
+                posthoc_results[day]['p_corrected'] = p_corrected[idx]
+                posthoc_results[day]['significant_fdr'] = reject[idx]
+
+            # Print results
+            for day in days:
+                if day in posthoc_results and not np.isnan(posthoc_results[day]['p_uncorrected']):
+                    p_unc = posthoc_results[day]['p_uncorrected']
+                    p_corr = posthoc_results[day].get('p_corrected', np.nan)
+                    sig = posthoc_results[day].get('significant_fdr', False)
+                    n = posthoc_results[day]['n_mice']
+
+                    sig_marker = '***' if p_corr < 0.001 else '**' if p_corr < 0.01 else '*' if p_corr < 0.05 else 'ns'
+                    print(f"    Day {day:+2d}: n={n} mice, p_uncorr={p_unc:.4f}, p_FDR={p_corr:.4f} {sig_marker}")
+                elif day in posthoc_results:
+                    n = posthoc_results[day]['n_mice']
+                    print(f"    Day {day:+2d}: Insufficient paired data (n={n} mice)")
+
+            # Save posthoc results to CSV
+            if save_path:
+                posthoc_csv = save_path.replace('.svg', f'_{reward_group.replace("+", "plus").replace("-", "minus")}_posthoc.csv')
+                posthoc_df = pd.DataFrame([
+                    {'day': day, **posthoc_results[day]}
+                    for day in days if day in posthoc_results
+                ])
+                posthoc_df.to_csv(posthoc_csv, index=False)
+                print(f"\n  Saved posthoc results: {posthoc_csv}")
+        else:
+            print("    No valid paired comparisons available")
+            posthoc_results = {day: {'p_corrected': np.nan, 'significant_fdr': False} for day in days}
 
         # Create barplot with individual mouse data points connected by lines
         x_positions = {day: idx for idx, day in enumerate(days)}
@@ -1037,14 +1389,14 @@ def plot_temporal_evolution(merged_df, participation_df_all, save_path=None):
                 ax.plot(mouse_x, mouse_y, '-', color=colors[lmi_category],
                        linewidth=0.8, alpha=0.4, zorder=5)
 
-        # Add significance markers for Wilcoxon tests
+        # Add significance markers for FDR-corrected posthoc tests
         y_max = 0.57
         for day in days:
-            if day in wilcoxon_results and not np.isnan(wilcoxon_results[day]):
-                p_val = wilcoxon_results[day]
+            if day in posthoc_results:
+                p_val = posthoc_results[day].get('p_corrected', np.nan)
                 x_center = x_positions[day]
 
-                if p_val < 0.05:
+                if not np.isnan(p_val) and p_val < 0.05:
                     sig_marker = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*'
                     ax.text(x_center, y_max, sig_marker, ha='center', va='bottom',
                            fontsize=12, fontweight='bold')
@@ -1063,8 +1415,60 @@ def plot_temporal_evolution(merged_df, participation_df_all, save_path=None):
 
     if save_path:
         plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
-        plt.close()
         print(f"  Saved to: {save_path}")
+
+        # Save data CSV (per-mouse participation rates for each day and LMI category)
+        data_csv = save_path.replace('.svg', '_data.csv')
+
+        # Combine all data from both reward groups
+        all_plot_data = []
+        for reward_group in ['R+', 'R-']:
+            # Get the merged_df for this reward group
+            group_merged = merged_df[merged_df['reward_group'] == reward_group]
+            lmi_categories = ['positive', 'negative']
+
+            for lmi_category in lmi_categories:
+                # Filter cells by LMI category
+                mask = group_merged['lmi_category'] == lmi_category
+                cells_df = group_merged[mask][['mouse_id', 'roi']]
+
+                if len(cells_df) == 0:
+                    continue
+
+                # Get participation data for these cells
+                for mouse_id in cells_df['mouse_id'].unique():
+                    mouse_cells = cells_df[cells_df['mouse_id'] == mouse_id]
+
+                    for day in days:
+                        participation_rates = []
+                        for _, row in mouse_cells.iterrows():
+                            cell_mask = (participation_df_all['mouse_id'] == mouse_id) & \
+                                       (participation_df_all['roi'] == row['roi']) & \
+                                       (participation_df_all['day'] == day)
+                            cell_data = participation_df_all[cell_mask]
+                            if len(cell_data) > 0:
+                                participation_rates.append(cell_data['participation_rate'].values[0])
+
+                        # Mean rate for this mouse-day-category
+                        if len(participation_rates) > 0:
+                            mean_rate = np.mean(participation_rates)
+                        else:
+                            mean_rate = 0.0
+
+                        all_plot_data.append({
+                            'reward_group': reward_group,
+                            'mouse_id': mouse_id,
+                            'day': day,
+                            'lmi_category': lmi_category,
+                            'participation_rate': mean_rate,
+                            'n_cells': len(participation_rates)
+                        })
+
+        plot_data_df = pd.DataFrame(all_plot_data)
+        plot_data_df.to_csv(data_csv, index=False)
+        print(f"  Data CSV saved: {data_csv}")
+
+        plt.close()
     else:
         return fig
 
@@ -1091,16 +1495,14 @@ def generate_visualizations(merged_df, participation_df_all, output_dir):
     plot_participation_rate_vs_lmi(
         merged_df,
         participation_metric='learning_rate',
-        significant_only=False,
         save_path=os.path.join(output_dir, 'participation_rate_vs_lmi_all.svg')
     )
 
-    print("\n  Figure 1b: Participation rate vs LMI scatter plot (significant LMI only)")
-    plot_participation_rate_vs_lmi(
+    print("\n  Figure 1b: Participation rate vs LMI histogram (all cells)")
+    plot_participation_rate_vs_lmi_histogram(
         merged_df,
         participation_metric='learning_rate',
-        significant_only=True,
-        save_path=os.path.join(output_dir, 'participation_rate_vs_lmi_significant.svg')
+        save_path=os.path.join(output_dir, 'participation_rate_vs_lmi_histogram_all.svg')
     )
 
     print("\n  Figure 2: Temporal evolution across days (barplot per mouse)")

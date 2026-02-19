@@ -36,13 +36,13 @@ days_str = ['-2', '-1', '0', '+1', '+2']
 n_map_trials = 40  # Number of mapping trials to use
 
 # Template and event detection parameters
-use_surrogate_thresholds = False  # Set to False to force use of threshold_corr even when surrogate file exists
+use_surrogate_thresholds = True  # Set to False to force use of threshold_corr even when surrogate file exists
 percentile_to_use = 95  # Which percentile threshold CSV to load: 95, 99, or 99.9 (only used if use_surrogate_thresholds=True)
 threshold_dff = None  # 5% dff threshold for including cells in template (use None for all cells)
 threshold_corr = 0.45  # Default correlation threshold for event detection (if no surrogate thresholds available OR use_surrogate_thresholds=False)
-min_event_distance_ms = 200  # Minimum distance between events (ms)
+min_event_distance_ms = 150  # Minimum distance between events (ms)
 min_event_distance_frames = int(min_event_distance_ms / 1000 * sampling_rate)
-prominence = 0.20  # Minimum prominence of peaks for event detection (vertical distance to contour line)
+prominence = 0.15  # Minimum prominence of peaks for event detection (vertical distance to contour line)
 
 # NOTE: Surrogate-based thresholds
 # If reactivation_surrogates_per_day.py has been run, the script will automatically load
@@ -897,10 +897,7 @@ def plot_events_per_day(frequency_by_day, mouse, save_path=None):
 
 def plot_percent_time_above_per_day(r_plus_results, r_minus_results, save_path):
     """
-    Plot percentage of time above threshold per day (two-panel bar chart).
-
-    Creates a two-panel figure with R+ and R- side by side with shared y-axis.
-    Includes statistical comparisons across days within each reward group.
+    Compare R+ vs R- % time above threshold per day (single-panel grouped bar chart).
 
     Parameters
     ----------
@@ -911,99 +908,128 @@ def plot_percent_time_above_per_day(r_plus_results, r_minus_results, save_path):
     save_path : str
         Path to save SVG file
     """
-    # Extract data for both groups
-    all_data = []
-    for reward_group, results_dict in [('R+', r_plus_results), ('R-', r_minus_results)]:
-        for mouse, results in results_dict.items():
-            for day in days:
-                if day in results['days']:
-                    day_data = results['days'][day]
-                    all_data.append({
-                        'mouse': mouse,
-                        'reward_group': reward_group,
-                        'day': day,
-                        'percent_time_above': day_data.get('percent_time_above', 0)
-                    })
+    data_list = []
+    for mouse, results in r_plus_results.items():
+        for day in days:
+            if day in results['days']:
+                data_list.append({'Day': day, 'PctTime': results['days'][day].get('percent_time_above', 0),
+                                  'Group': 'R+', 'Mouse': mouse})
+    for mouse, results in r_minus_results.items():
+        for day in days:
+            if day in results['days']:
+                data_list.append({'Day': day, 'PctTime': results['days'][day].get('percent_time_above', 0),
+                                  'Group': 'R-', 'Mouse': mouse})
 
-    df = pd.DataFrame(all_data)
+    df = pd.DataFrame(data_list)
 
-    # Create two-panel plot with shared y-axis
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+    # Per-day Mann-Whitney U R+ vs R-
+    days_list = sorted(days)
+    r_plus_by_day  = {day: df[(df['Day'] == day) & (df['Group'] == 'R+')]['PctTime'].values for day in days_list}
+    r_minus_by_day = {day: df[(df['Day'] == day) & (df['Group'] == 'R-')]['PctTime'].values for day in days_list}
 
-    # Plot each reward group
-    for idx, (reward_group, ax) in enumerate(zip(['R+', 'R-'], axes)):
-        group_df = df[df['reward_group'] == reward_group]
+    p_values = []
+    for day in days_list:
+        rp, rm = r_plus_by_day[day], r_minus_by_day[day]
+        if len(rp) > 0 and len(rm) > 0:
+            try:
+                _, p = mannwhitneyu(rp, rm, alternative='two-sided')
+            except Exception:
+                p = 1.0
+        else:
+            p = 1.0
+        p_values.append(p)
 
-        if len(group_df) == 0:
-            ax.text(0.5, 0.5, f'No data for {reward_group}',
-                   transform=ax.transAxes, ha='center', va='center')
+    # Pad missing days for plotting
+    for day in days_list:
+        if day not in df['Day'].unique():
+            df = pd.concat([df, pd.DataFrame({'Day': [day], 'PctTime': [np.nan], 'Group': ['R+'], 'Mouse': ['']})], ignore_index=True)
+            df = pd.concat([df, pd.DataFrame({'Day': [day], 'PctTime': [np.nan], 'Group': ['R-'], 'Mouse': ['']})], ignore_index=True)
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+
+    sns.barplot(data=df, x='Day', y='PctTime', hue='Group',
+                errorbar=('ci', 95),
+                palette={'R+': reward_palette[1], 'R-': reward_palette[0]},
+                hue_order=['R+', 'R-'],
+                alpha=0.7, edgecolor='black', ax=ax)
+
+    # Individual mouse trajectories
+    x_positions = {day: idx for idx, day in enumerate(days_list)}
+    bar_width = 0.35
+    group_offsets = {'R+': -bar_width / 2, 'R-': bar_width / 2}
+    for mouse in df['Mouse'].unique():
+        if mouse == '':
             continue
+        mdata = df[df['Mouse'] == mouse].sort_values('Day')
+        group = mdata['Group'].iloc[0]
+        mx = [x_positions[d] + group_offsets[group] for d in mdata['Day']]
+        my = mdata['PctTime'].values
+        ax.plot(mx, my, '-', color=reward_palette[1] if group == 'R+' else reward_palette[0],
+                linewidth=0.8, alpha=0.5, zorder=5)
 
-        # Compute mean and SEM per day
-        day_means = group_df.groupby('day')['percent_time_above'].mean()
-        day_sems = group_df.groupby('day')['percent_time_above'].sem()
+    # Significance brackets
+    def get_stars(p):
+        if p < 0.001: return '***'
+        elif p < 0.01: return '**'
+        elif p < 0.05: return '*'
+        return 'ns'
 
-        # Bar plot
-        color = reward_palette[1] if reward_group == 'R+' else reward_palette[0]
-        ax.bar(days_str, day_means.values, yerr=day_sems.values,
-               color=color, alpha=0.7, capsize=5, edgecolor='black', linewidth=1.5)
+    y_max = df['PctTime'].max()
+    y_range = y_max if y_max > 0 else 1
+    width = 0.35
+    for day_idx, p_val in enumerate(p_values):
+        stars = get_stars(p_val)
+        if stars != 'ns':
+            rp = df[(df['Day'] == days_list[day_idx]) & (df['Group'] == 'R+') & (df['Mouse'] != '')]['PctTime']
+            rm = df[(df['Day'] == days_list[day_idx]) & (df['Group'] == 'R-') & (df['Mouse'] != '')]['PctTime']
+            rp_top = rp.mean() + 1.96 * rp.std() / np.sqrt(len(rp)) if len(rp) > 0 else 0
+            rm_top = rm.mean() + 1.96 * rm.std() / np.sqrt(len(rm)) if len(rm) > 0 else 0
+            y1 = max(rp_top, rm_top)
+            y2 = y1 + y_range * 0.05
+            x1, x2 = day_idx - width / 2, day_idx + width / 2
+            ax.plot([x1, x1, x2, x2], [y1, y2, y2, y1], 'k-', linewidth=1)
+            ax.text((x1 + x2) / 2, y2, stars, ha='center', va='bottom', fontsize=12, fontweight='bold')
 
-        # Formatting
-        ax.set_xlabel('Day', fontsize=12, fontweight='bold')
-        if idx == 0:
-            ax.set_ylabel('% Time Above Threshold', fontsize=12, fontweight='bold')
-        ax.set_title(f'{reward_group} Mice', fontsize=14, fontweight='bold')
-        ax.grid(axis='y', alpha=0.3)
+    ax.set_xlabel('Day', fontsize=12, fontweight='bold')
+    ax.set_ylabel('% Time Above Threshold', fontsize=12, fontweight='bold')
+    ax.set_title('R+ vs R- % Time Above Threshold Per Day\n' +
+                 f'(R+: n={len(r_plus_results)} mice, R-: n={len(r_minus_results)} mice)',
+                 fontsize=13, fontweight='bold')
+    ax.legend(fontsize=11, loc='upper left')
+    ax.grid(True, alpha=0.3, axis='y')
 
-        # Add n mice annotation
-        n_mice = group_df['mouse'].nunique()
-        ax.text(0.02, 0.98, f'n = {n_mice} mice',
-                transform=ax.transAxes, fontsize=10,
-                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-        # Statistical test across days (Friedman test for repeated measures)
-        # Only if we have data from multiple days and multiple mice
-        if len(day_means) > 1 and n_mice >= 3:
-            # Prepare data for Friedman test (mice x days matrix)
-            mice = group_df['mouse'].unique()
-            day_data_per_mouse = []
-
-            # Build matrix: each row is a mouse, each column is a day
-            for mouse in mice:
-                mouse_data = group_df[group_df['mouse'] == mouse]
-                mouse_values = []
-                has_all_days = True
-                for day in days:
-                    day_value = mouse_data[mouse_data['day'] == day]['percent_time_above']
-                    if len(day_value) > 0:
-                        mouse_values.append(day_value.values[0])
-                    else:
-                        has_all_days = False
-                        break
-
-                # Only include mice with all days present
-                if has_all_days:
-                    day_data_per_mouse.append(mouse_values)
-
-            # Run Friedman test if we have enough complete cases
-            if len(day_data_per_mouse) >= 3:
-                day_data_per_mouse = np.array(day_data_per_mouse)
-                # Each column is a day, pass as separate arguments
-                stat, p_value = friedmanchisquare(*[day_data_per_mouse[:, i] for i in range(len(days))])
-
-                # Add stats text
-                stats_text = f'Friedman test:\nχ²={stat:.2f}, p={p_value:.4f}'
-                ax.text(0.98, 0.98, stats_text,
-                       transform=ax.transAxes, fontsize=9,
-                       verticalalignment='top', horizontalalignment='right',
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
-
-    plt.suptitle('Percentage of Time Above Threshold Per Day', fontsize=16, fontweight='bold', y=1.02)
     plt.tight_layout()
-    plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
-    plt.close()
 
-    print(f"  Saved: {save_path}")
+    if save_path:
+        plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
+        print(f"  SVG saved: {save_path}")
+        plt.close()
+
+        # Data CSV
+        data_csv = save_path.replace('.svg', '_data.csv')
+        df[df['Mouse'] != ''].to_csv(data_csv, index=False)
+        print(f"  Data CSV saved: {data_csv}")
+
+        # Stats CSV
+        stats_list = []
+        for day_idx, day in enumerate(days_list):
+            p_val = p_values[day_idx]
+            rp = df[(df['Day'] == day) & (df['Group'] == 'R+') & (df['Mouse'] != '')]['PctTime']
+            rm = df[(df['Day'] == day) & (df['Group'] == 'R-') & (df['Mouse'] != '')]['PctTime']
+            stats_list.append({
+                'day': day,
+                'r_plus_mean': rp.mean() if len(rp) > 0 else np.nan,
+                'r_plus_sem': rp.std() / np.sqrt(len(rp)) if len(rp) > 0 else np.nan,
+                'r_plus_n': len(rp),
+                'r_minus_mean': rm.mean() if len(rm) > 0 else np.nan,
+                'r_minus_sem': rm.std() / np.sqrt(len(rm)) if len(rm) > 0 else np.nan,
+                'r_minus_n': len(rm),
+                'mann_whitney_p': p_val,
+                'significance': get_stars(p_val),
+            })
+        stats_csv = save_path.replace('.svg', '_stats.csv')
+        pd.DataFrame(stats_list).to_csv(stats_csv, index=False)
+        print(f"  Stats CSV saved: {stats_csv}")
 
 
 def compute_reactivation_frequency_per_trial(selected_trials, template, threshold,
@@ -1583,6 +1609,70 @@ def plot_session_level_across_mice(r_plus_results, r_minus_results, save_path):
     if save_path:
         plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
         print(f"  SVG saved: {save_path}")
+
+        # Save data CSV (combined for both groups)
+        data_csv = save_path.replace('.svg', '_data.csv')
+        all_data = []
+
+        for group_name, all_results in [('R+', r_plus_results), ('R-', r_minus_results)]:
+            for mouse, results in all_results.items():
+                if 0 in results['days']:
+                    all_data.append({
+                        'group': group_name,
+                        'mouse': mouse,
+                        'reactivation_frequency': results['days'][0]['event_frequency'],
+                        'hit_rate': results['days'][0]['session_hr_mean']
+                    })
+
+        data_df = pd.DataFrame(all_data)
+        data_df.to_csv(data_csv, index=False)
+        print(f"  Data CSV saved: {data_csv}")
+
+        # Save statistics CSV (correlation stats for each group)
+        stats_csv = save_path.replace('.svg', '_stats.csv')
+        stats_list = []
+
+        for group_name, all_results in [('R+', r_plus_results), ('R-', r_minus_results)]:
+            mice_list = []
+            event_frequency_list = []
+            session_hr_list = []
+
+            for mouse, results in all_results.items():
+                if 0 in results['days']:
+                    mice_list.append(mouse)
+                    event_frequency_list.append(results['days'][0]['event_frequency'])
+                    session_hr_list.append(results['days'][0]['session_hr_mean'])
+
+            if len(event_frequency_list) > 1 and np.std(event_frequency_list) > 0:
+                slope, intercept, r_value, p_value, std_err = linregress(event_frequency_list, session_hr_list)
+                stats_list.append({
+                    'group': group_name,
+                    'n_mice': len(mice_list),
+                    'pearson_r': r_value,
+                    'r_squared': r_value**2,
+                    'p_value': p_value,
+                    'slope': slope,
+                    'intercept': intercept,
+                    'std_err': std_err,
+                    'test': 'Linear regression'
+                })
+            else:
+                stats_list.append({
+                    'group': group_name,
+                    'n_mice': len(mice_list),
+                    'pearson_r': np.nan,
+                    'r_squared': np.nan,
+                    'p_value': np.nan,
+                    'slope': np.nan,
+                    'intercept': np.nan,
+                    'std_err': np.nan,
+                    'test': 'Insufficient variance'
+                })
+
+        stats_df = pd.DataFrame(stats_list)
+        stats_df.to_csv(stats_csv, index=False)
+        print(f"  Stats CSV saved: {stats_csv}")
+
         plt.close()
 
     return fig
@@ -1955,9 +2045,11 @@ def plot_group_comparison_per_day(r_plus_results, r_minus_results, save_path):
             # Calculate x positions with group offset
             mouse_x = [x_positions[day] + group_offsets[group] for day in mouse_data['Day']]
             mouse_y = mouse_data['Frequency'].values
-            
-            # Plot line (no markers), grey color
-            ax.plot(mouse_x, mouse_y, '-', color='grey', 
+
+            # Plot line (no markers), colored by reward group
+            # reward_palette[0] = '#D656AE' (magenta for R-), reward_palette[1] = '#1BC477' (teal for R+)
+            group_color = reward_palette[1] if group == 'R+' else reward_palette[0]
+            ax.plot(mouse_x, mouse_y, '-', color=group_color,
                    linewidth=0.8, alpha=0.5, zorder=5)
 
 
@@ -2019,6 +2111,48 @@ def plot_group_comparison_per_day(r_plus_results, r_minus_results, save_path):
     if save_path:
         plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
         print(f"  SVG saved: {save_path}")
+
+        # Save data CSV
+        data_csv = save_path.replace('.svg', '_data.csv')
+        df_export = df[df['Mouse'] != ''].copy()  # Remove dummy rows
+        df_export.to_csv(data_csv, index=False)
+        print(f"  Data CSV saved: {data_csv}")
+
+        # Save statistics CSV
+        stats_csv = save_path.replace('.svg', '_stats.csv')
+        stats_list = []
+        for day_idx, day in enumerate(days_list):
+            p_val = p_values[day_idx]
+            stars = get_significance_stars(p_val)
+            r_plus_data = df[(df['Day'] == day) & (df['Group'] == 'R+') & (df['Mouse'] != '')]['Frequency']
+            r_minus_data = df[(df['Day'] == day) & (df['Group'] == 'R-') & (df['Mouse'] != '')]['Frequency']
+
+            r_plus_mean = r_plus_data.mean() if len(r_plus_data) > 0 else np.nan
+            r_plus_sem = r_plus_data.std() / np.sqrt(len(r_plus_data)) if len(r_plus_data) > 0 else np.nan
+            r_plus_ci = 1.96 * r_plus_sem if len(r_plus_data) > 0 else np.nan
+            r_minus_mean = r_minus_data.mean() if len(r_minus_data) > 0 else np.nan
+            r_minus_sem = r_minus_data.std() / np.sqrt(len(r_minus_data)) if len(r_minus_data) > 0 else np.nan
+            r_minus_ci = 1.96 * r_minus_sem if len(r_minus_data) > 0 else np.nan
+
+            stats_list.append({
+                'day': day,
+                'R+_mean': r_plus_mean,
+                'R+_sem': r_plus_sem,
+                'R+_ci95': r_plus_ci,
+                'R+_n': len(r_plus_data),
+                'R-_mean': r_minus_mean,
+                'R-_sem': r_minus_sem,
+                'R-_ci95': r_minus_ci,
+                'R-_n': len(r_minus_data),
+                'p_value': p_val,
+                'significance': stars,
+                'test': 'Mann-Whitney U'
+            })
+
+        stats_df = pd.DataFrame(stats_list)
+        stats_df.to_csv(stats_csv, index=False)
+        print(f"  Stats CSV saved: {stats_csv}")
+
         plt.close()
 
     # Print statistics summary
@@ -2028,8 +2162,8 @@ def plot_group_comparison_per_day(r_plus_results, r_minus_results, save_path):
     for day_idx, day in enumerate(days_list):
         p_val = p_values[day_idx]
         stars = get_significance_stars(p_val)
-        r_plus_data = df[(df['Day'] == day) & (df['Group'] == 'R+')]['Frequency']
-        r_minus_data = df[(df['Day'] == day) & (df['Group'] == 'R-')]['Frequency']
+        r_plus_data = df[(df['Day'] == day) & (df['Group'] == 'R+') & (df['Mouse'] != '')]['Frequency']
+        r_minus_data = df[(df['Day'] == day) & (df['Group'] == 'R-') & (df['Mouse'] != '')]['Frequency']
 
         r_plus_mean = r_plus_data.mean() if len(r_plus_data) > 0 else 0
         r_plus_ci = 1.96 * r_plus_data.std() / np.sqrt(len(r_plus_data)) if len(r_plus_data) > 0 else 0
@@ -2039,6 +2173,106 @@ def plot_group_comparison_per_day(r_plus_results, r_minus_results, save_path):
         print(f"Day {day:+d}: p = {p_val:.4f} {stars}")
         print(f"  R+: {r_plus_mean:.3f} ± {r_plus_ci:.3f} (95% CI, n={len(r_plus_data)})")
         print(f"  R-: {r_minus_mean:.3f} ± {r_minus_ci:.3f} (95% CI, n={len(r_minus_data)})")
+
+    return fig
+
+
+def plot_threshold_comparison_per_day(r_plus_results, r_minus_results, save_path):
+    """
+    Compare thresholds used for R+ vs R- across days.
+    Simple sanity check visualization without statistical tests.
+
+    Parameters
+    ----------
+    r_plus_results : dict
+        Dictionary with results for R+ mice
+    r_minus_results : dict
+        Dictionary with results for R- mice
+    save_path : str
+        Path to save SVG figure
+    """
+
+    # Collect threshold data into a DataFrame in long format
+    data_list = []
+
+    for mouse, results in r_plus_results.items():
+        for day in days:
+            if day in results['days']:
+                threshold = results['days'][day].get('threshold_used', None)
+                if threshold is not None:
+                    data_list.append({
+                        'Day': day,
+                        'Threshold': threshold,
+                        'Group': 'R+',
+                        'Mouse': mouse
+                    })
+
+    for mouse, results in r_minus_results.items():
+        for day in days:
+            if day in results['days']:
+                threshold = results['days'][day].get('threshold_used', None)
+                if threshold is not None:
+                    data_list.append({
+                        'Day': day,
+                        'Threshold': threshold,
+                        'Group': 'R-',
+                        'Mouse': mouse
+                    })
+
+    df = pd.DataFrame(data_list)
+
+    # Ensure all days are present in the x-axis, even if no data
+    all_days = sorted(days)
+    for day in all_days:
+        if day not in df['Day'].unique():
+            df = pd.concat([df, pd.DataFrame({'Day': [day], 'Threshold': [np.nan], 'Group': ['R+'], 'Mouse': ['']})], ignore_index=True)
+            df = pd.concat([df, pd.DataFrame({'Day': [day], 'Threshold': [np.nan], 'Group': ['R-'], 'Mouse': ['']})], ignore_index=True)
+
+    # Create figure
+    fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+
+    # Create barplot with 95% confidence intervals using seaborn
+    sns.barplot(data=df, x='Day', y='Threshold', hue='Group',
+                errorbar=('ci', 95),
+                palette={'R+': reward_palette[1], 'R-': reward_palette[0]},
+                hue_order=['R+', 'R-'],
+                alpha=0.7, edgecolor='black', ax=ax)
+
+    # Add individual mouse trajectories
+    x_positions = {day: idx for idx, day in enumerate(all_days)}
+    bar_width = 0.35
+    group_offsets = {'R+': -bar_width/2, 'R-': bar_width/2}
+
+    for mouse in df['Mouse'].unique():
+        if mouse == '':  # Skip dummy rows
+            continue
+
+        mouse_data = df[df['Mouse'] == mouse].sort_values('Day')
+
+        if len(mouse_data) > 0:
+            group = mouse_data['Group'].iloc[0]
+            mouse_x = [x_positions[day] + group_offsets[group] for day in mouse_data['Day']]
+            mouse_y = mouse_data['Threshold'].values
+
+            group_color = reward_palette[1] if group == 'R+' else reward_palette[0]
+            ax.plot(mouse_x, mouse_y, '-', color=group_color,
+                   linewidth=0.8, alpha=0.5, zorder=5)
+
+    # Formatting
+    ax.set_xlabel('Day', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Correlation Threshold', fontsize=12, fontweight='bold')
+    ax.set_title('R+ vs R- Threshold Comparison Across Days\n' +
+                f'(R+: n={len(r_plus_results)} mice, R-: n={len(r_minus_results)} mice)',
+                fontsize=13, fontweight='bold')
+    ax.legend(fontsize=11, loc='upper left')
+    ax.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
+        print(f"  Threshold comparison SVG saved: {save_path}")
+        plt.close()
 
     return fig
 
@@ -2148,6 +2382,98 @@ def plot_reactivation_vs_performance_delta(r_plus_results, r_minus_results, save
     if save_path:
         plt.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
         print(f"\n✓ Saved reactivation vs performance delta plot: {save_path}")
+
+        # Save data CSV (combined for both groups)
+        data_csv = save_path.replace('.svg', '_data.csv')
+        all_data = []
+
+        for group_name, all_results in [('R+', r_plus_results), ('R-', r_minus_results)]:
+            for mouse_id, results in all_results.items():
+                if 0 in results['days'] and 1 in results['days']:
+                    reactivation_day0 = results['days'][0]['event_frequency']
+                    hr_day0 = results['days'][0]['session_hr_mean']
+                    hr_day1 = results['days'][1]['session_hr_mean']
+                    delta_hr = hr_day1 - hr_day0
+
+                    all_data.append({
+                        'group': group_name,
+                        'mouse': mouse_id,
+                        'reactivation_frequency_day0': reactivation_day0,
+                        'hit_rate_day0': hr_day0,
+                        'hit_rate_day1': hr_day1,
+                        'delta_hit_rate': delta_hr
+                    })
+
+        data_df = pd.DataFrame(all_data)
+        data_df.to_csv(data_csv, index=False)
+        print(f"  Data CSV saved: {data_csv}")
+
+        # Save statistics CSV (correlation stats for each group)
+        stats_csv = save_path.replace('.svg', '_stats.csv')
+        stats_list = []
+
+        for group_name, all_results in [('R+', r_plus_results), ('R-', r_minus_results)]:
+            reactivation_freq_day0 = []
+            delta_performance = []
+
+            for mouse_id, results in all_results.items():
+                if 0 in results['days'] and 1 in results['days']:
+                    reactivation_day0 = results['days'][0]['event_frequency']
+                    hr_day0 = results['days'][0]['session_hr_mean']
+                    hr_day1 = results['days'][1]['session_hr_mean']
+                    delta_hr = hr_day1 - hr_day0
+
+                    reactivation_freq_day0.append(reactivation_day0)
+                    delta_performance.append(delta_hr)
+
+            x = np.array(reactivation_freq_day0)
+            y = np.array(delta_performance)
+
+            if len(x) >= 3 and np.std(x) > 0:
+                r, p_val = pearsonr(x, y)
+                slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+
+                significance = ""
+                if p_val < 0.001:
+                    significance = "***"
+                elif p_val < 0.01:
+                    significance = "**"
+                elif p_val < 0.05:
+                    significance = "*"
+                else:
+                    significance = "ns"
+
+                stats_list.append({
+                    'group': group_name,
+                    'n_mice': len(x),
+                    'pearson_r': r,
+                    'p_value': p_val,
+                    'significance': significance,
+                    'slope': slope,
+                    'intercept': intercept,
+                    'r_squared': r_value**2,
+                    'std_err': std_err,
+                    'test': 'Pearson correlation'
+                })
+            else:
+                reason = 'insufficient data' if len(x) < 3 else 'no variance'
+                stats_list.append({
+                    'group': group_name,
+                    'n_mice': len(x),
+                    'pearson_r': np.nan,
+                    'p_value': np.nan,
+                    'significance': reason,
+                    'slope': np.nan,
+                    'intercept': np.nan,
+                    'r_squared': np.nan,
+                    'std_err': np.nan,
+                    'test': reason
+                })
+
+        stats_df = pd.DataFrame(stats_list)
+        stats_df.to_csv(stats_csv, index=False)
+        print(f"  Stats CSV saved: {stats_csv}")
+
         plt.close()
 
     return fig
@@ -3382,6 +3708,10 @@ if __name__ == "__main__":
     # Figure 2: Direct R+ vs R- comparison with statistics
     svg_path = os.path.join(save_dir, f'across_mice_group_comparison_per_day{percentile_suffix}.svg')
     plot_group_comparison_per_day(r_plus_results, r_minus_results, svg_path)
+
+    # Figure 2b: Threshold comparison across days (R+ vs R-)
+    svg_path = os.path.join(save_dir, f'threshold_comparison_per_day{percentile_suffix}.svg')
+    plot_threshold_comparison_per_day(r_plus_results, r_minus_results, svg_path)
 
     # Figure 3: Reactivation frequency vs performance improvement (day 0 → day +1)
     svg_path = os.path.join(save_dir, f'reactivation_vs_performance_delta{percentile_suffix}.svg')

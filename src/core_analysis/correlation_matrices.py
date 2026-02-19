@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib import colors
-from scipy.stats import mannwhitneyu, wilcoxon
+from scipy.stats import mannwhitneyu, wilcoxon, kruskal
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
@@ -583,22 +583,21 @@ for mouse_id in day0_metrics_combined['mouse_id'].unique():
     ax2.plot(range(len(days)), mouse_data.sort_values('day')['correlation'].values,
              color=color, alpha=0.3, linewidth=0.8, zorder=1)
 
-# Statistical comparison: Day -2 vs Day +2 for each reward group
+# Statistical comparison: Kruskal-Wallis across all days, one per reward group
 print("\n" + "-"*60)
-print("STATISTICAL COMPARISONS - Day -2 vs Day +2 (Wilcoxon signed-rank test)")
+print("STATISTICAL COMPARISONS - Kruskal-Wallis across days (per reward group)")
 print("-"*60)
 
-day_neg2_vs_pos2_stats = {}
+kruskal_stats = {}
 for group, df in [('R+', day0_metrics_rew), ('R-', day0_metrics_nonrew)]:
-    day_neg2 = df['corr_day0_vs_day-2'].dropna().values
-    day_pos2 = df['corr_day0_vs_day+2'].dropna().values
-    stat, p_value = wilcoxon(day_neg2, day_pos2, alternative='two-sided')
-    day_neg2_vs_pos2_stats[group] = p_value
-    print(f"{group}: W={stat:.1f}, p={p_value:.4f} {'***' if p_value < 0.001 else '**' if p_value < 0.01 else '*' if p_value < 0.05 else 'n.s.'}")
+    day_groups = [df[f'corr_day0_vs_day{d:+d}'].dropna().values for d in days]
+    stat, p_value = kruskal(*day_groups)
+    kruskal_stats[group] = p_value
+    print(f"{group}: H={stat:.2f}, p={p_value:.4f} {'***' if p_value < 0.001 else '**' if p_value < 0.01 else '*' if p_value < 0.05 else 'n.s.'}")
 
-# Display stats on plot for Day -2 vs Day +2 comparison
+# Display stats on plot
 y_text_base = 0.27
-for idx, (group, p_value) in enumerate(day_neg2_vs_pos2_stats.items()):
+for idx, (group, p_value) in enumerate(kruskal_stats.items()):
     if p_value < 0.001:
         p_text = f'{group}: ***'
     elif p_value < 0.01:

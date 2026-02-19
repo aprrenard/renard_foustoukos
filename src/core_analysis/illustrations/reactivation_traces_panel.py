@@ -31,11 +31,7 @@ SAMPLING_RATE = 30
 
 # Time duration to display per day (in seconds)
 # Set to None to show entire trace, or specify duration (e.g., 180 for 3 minutes)
-TIME_WINDOW_PER_DAY = 150 
-
-# Number of horizontal lines/rows to display per subplot
-# Each line will show TIME_WINDOW_PER_DAY / N_LINES_PER_SUBPLOT seconds
-N_LINES_PER_SUBPLOT = 5  # 5 lines = 30 seconds per line
+TIME_WINDOW_PER_DAY = 120
 
 # Path to saved reactivation results
 RESULTS_DIR = os.path.join(io.results_dir, 'reactivation')
@@ -54,13 +50,12 @@ def plot_example_mouse_correlation_traces_panel(r_plus_results, r_minus_results,
                                                  days=[-2, -1, 0, 1, 2],
                                                  sampling_rate=30,
                                                  time_window=None,
-                                                 n_lines=5,
+                                                 n_lines=None,  # Deprecated parameter
                                                  save_path=None):
     """
-    Create a 5-column panel showing correlation traces across days for an example mouse.
-    Each column shows one day with correlation trace split into multiple horizontal lines,
-    similar to an oscilloscope display.
-    Sized to fit as a panel in a row of an A4 figure.
+    Create a 5-row panel showing correlation traces across days for an example mouse.
+    Each row shows one day as a continuous horizontal trace with gaps between trials.
+    Sized to fit as a panel in an A4 figure.
 
     Parameters
     ----------
@@ -77,7 +72,7 @@ def plot_example_mouse_correlation_traces_panel(r_plus_results, r_minus_results,
     time_window : float, optional
         Time duration to display per day in seconds (default: None shows entire trace)
     n_lines : int, optional
-        Number of horizontal lines to display per subplot (default: 5)
+        Deprecated parameter (kept for backward compatibility)
     save_path : str, optional
         Path to save figure
 
@@ -109,9 +104,12 @@ def plot_example_mouse_correlation_traces_panel(r_plus_results, r_minus_results,
 
     ylim = (np.min(all_correlations), np.max(all_correlations))
 
-    # Create figure with 5 columns (one per day)
-    # Size: ~8.27 inches wide (A4 width), ~2.5 inches tall (suitable for a figure panel)
-    fig, axes = plt.subplots(1, 5, figsize=(8.27, 2.5), sharey=False)
+    # Create figure with 5 rows (one per day)
+    # Size: ~8.27 inches wide (A4 width), ~6.0 inches tall for 5 stacked traces
+    fig, axes = plt.subplots(5, 1, figsize=(8.27, 6.0), sharex=False)
+
+    # Number of NaN values to insert between trials as gaps (small = subtle separator)
+    nan_gap = 45
 
     for i, day in enumerate(days):
         ax = axes[i]
@@ -120,7 +118,7 @@ def plot_example_mouse_correlation_traces_panel(r_plus_results, r_minus_results,
             # No data for this day
             ax.text(0.5, 0.5, 'No data', ha='center', va='center',
                    transform=ax.transAxes, fontsize=10, color='gray')
-            ax.set_xlabel(f'Day {day}', fontsize=9, fontweight='bold')
+            ax.set_ylabel(f'Day {day}', fontsize=9, fontweight='bold')
             ax.set_ylim(ylim)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
@@ -128,90 +126,105 @@ def plot_example_mouse_correlation_traces_panel(r_plus_results, r_minus_results,
 
         # Get data for this day
         day_data = results['days'][day]
-        correlations = day_data['correlations']
-        events = day_data['events']
-        threshold_used = day_data.get('threshold_used', None)
+        correlations = np.array(day_data['correlations'])
+        events = np.array(day_data['events'])
+        threshold_used = day_data.get('threshold_used', 0.45)
+
+        # Use stored n_timepoints as the authoritative frames-per-trial value.
+        # Do NOT derive it from total_frames/n_trials: if time_window truncates
+        # total_frames while n_trials stays at the full-session count, the
+        # division gives a wrongly small frames_per_trial and gaps appear
+        # far too often.
+        frames_per_trial = day_data.get('n_timepoints', None)
 
         # Apply time window if specified
         if time_window is not None:
             max_frames = int(time_window * sampling_rate)
             correlations = correlations[:max_frames]
-            # Filter events to only those within the time window
             events = events[events < max_frames]
 
-        # Calculate frames per line
         total_frames = len(correlations)
-        frames_per_line = int(total_frames / n_lines) if n_lines > 0 else total_frames
 
-        # Calculate amplitude range for normalization
-        corr_range = ylim[1] - ylim[0]
-        # Vertical spacing between lines (as fraction of correlation range)
-        line_spacing = corr_range * 1.2  # 20% gap between lines
+        if frames_per_trial is None or frames_per_trial <= 0:
+            frames_per_trial = int(12 * sampling_rate)   # last-resort fallback
+        n_trials = total_frames // frames_per_trial       # recompute after any truncation
 
-        # Plot each line
-        total_events = 0
-        for line_idx in range(n_lines):
-            # Get data segment for this line
-            start_idx = line_idx * frames_per_line
-            end_idx = min((line_idx + 1) * frames_per_line, total_frames)
+        # Insert NaN gaps between trials to create visual separation
+        # Split correlations into trials and add gaps
+        trial_parts = []
+        event_parts = []
+        cumulative_frames = 0
+
+        for trial_idx in range(n_trials):
+            start_idx = trial_idx * frames_per_trial
+            end_idx = min((trial_idx + 1) * frames_per_trial, total_frames)
 
             if start_idx >= total_frames:
                 break
 
-            corr_segment = correlations[start_idx:end_idx]
+            # Add trial data
+            trial_data = correlations[start_idx:end_idx]
+            trial_parts.append(trial_data)
 
-            # Time axis for this segment (starting from 0 for each line)
-            time_segment = np.arange(len(corr_segment)) / sampling_rate
+            # Update event indices for this trial (shift by cumulative frames + gaps)
+            trial_events = events[(events >= start_idx) & (events < end_idx)]
+            shifted_events = trial_events - start_idx + cumulative_frames
+            event_parts.append(shifted_events)
 
-            # Vertical offset for this line (top to bottom)
-            offset = -line_idx * line_spacing
+            cumulative_frames += len(trial_data)
 
-            # Plot correlation trace with offset
-            ax.plot(time_segment, corr_segment + offset, 'k-', linewidth=0.7, alpha=0.9)
+            # Add NaN gap (except after last trial)
+            if trial_idx < n_trials - 1 and end_idx < total_frames:
+                trial_parts.append(np.full(nan_gap, np.nan))
+                cumulative_frames += nan_gap
 
-            # Plot reference lines (0 and 0.45) as grey dotted lines
-            threshold = 0.45
-            ax.axhline(threshold + offset, color='gray', linestyle=':',
-                      linewidth=0.6, alpha=0.5)
-            ax.axhline(0 + offset, color='gray', linestyle=':',
-                      linewidth=0.6, alpha=0.5)
+        # Concatenate all parts
+        corr_with_gaps = np.concatenate(trial_parts)
+        events_shifted = np.concatenate(event_parts) if event_parts else np.array([])
 
-            # Add vertical lines for reactivation events in this segment (from findpeak detection)
-            segment_events = events[(events >= start_idx) & (events < end_idx)]
-            for event_idx in segment_events:
-                # Convert to time within this segment
-                event_time = (event_idx - start_idx) / sampling_rate
-                # Calculate y-range for this specific trace line
-                y_min = offset - corr_range * 0.6
-                y_max = offset + corr_range * 0.6
-                ax.plot([event_time, event_time], [y_min, y_max],
-                       color='red', linewidth=0.8, alpha=0.7, clip_on=False)
-                total_events += 1
+        # Create time vector with gaps
+        # Build time accounting for NaN gaps
+        time_parts = []
+        current_time = 0
+        gap_duration = nan_gap / sampling_rate
 
-            # Add time label at the start of each line
-            start_time_sec = start_idx / sampling_rate
-            ax.text(-0.02, offset, f'{int(start_time_sec)}s',
-                   transform=ax.get_yaxis_transform(),
-                   fontsize=6, ha='right', va='center', color='gray')
+        for trial_idx in range(len(trial_parts)):
+            part = trial_parts[trial_idx]
+            n_points = len(part)
+
+            if np.all(np.isnan(part)):
+                # This is a gap - add NaN times
+                time_parts.append(np.full(n_points, np.nan))
+            else:
+                # This is actual data - add sequential times
+                trial_time = np.arange(n_points) / sampling_rate + current_time
+                time_parts.append(trial_time)
+                current_time = trial_time[-1] + 1/sampling_rate + gap_duration
+
+        time_vec = np.concatenate(time_parts)
+
+        # Plot correlation trace with gaps
+        ax.plot(time_vec, corr_with_gaps, 'k-', linewidth=0.7, alpha=0.9)
+
+        # Plot reference lines
+        ax.axhline(threshold_used, color='gray', linestyle=':', linewidth=0.6, alpha=0.5)
+        ax.axhline(0, color='gray', linestyle=':', linewidth=0.6, alpha=0.5)
+
+        # Add vertical lines for reactivation events
+        total_events = len(events_shifted)
+        for event_idx in events_shifted:
+            event_time = time_vec[int(event_idx)]
+            if not np.isnan(event_time):
+                ax.axvline(event_time, color='red', linewidth=0.8, alpha=0.7,
+                          ymin=0.1, ymax=0.9)
 
         # Formatting
-        # Set y-limits to accommodate all lines
-        y_bottom = -(n_lines - 1) * line_spacing - corr_range
-        y_top = corr_range * 0.5
-        ax.set_ylim(y_bottom, y_top)
-
-        # Set x-limits (time per line)
-        time_per_line = frames_per_line / sampling_rate
-        ax.set_xlim(0, time_per_line)
-
+        ax.set_ylim(ylim)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.spines['left'].set_visible(False)
-        ax.set_yticks([])  # Hide y-ticks since we have multiple offset traces
 
-        # Only show y-label on first subplot
-        if i == 0:
-            ax.set_ylabel('Correlation', fontsize=9, fontweight='bold')
+        # Y-label shows day
+        ax.set_ylabel(f'Day {day}', fontsize=9, fontweight='bold')
 
         # Add event count annotation
         ax.text(0.98, 0.98, f'n={total_events}',
@@ -220,25 +233,18 @@ def plot_example_mouse_correlation_traces_panel(r_plus_results, r_minus_results,
                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
                         edgecolor='gray', alpha=0.8))
 
-        # Set x-axis to show time in seconds
+        # X-axis formatting
         ax.tick_params(axis='both', labelsize=7)
-        # Show ticks every 10-30 seconds depending on time per line
-        if time_per_line > 60:
-            tick_interval = 30
-        elif time_per_line > 30:
-            tick_interval = 15
-        else:
-            tick_interval = 10
-        tick_locs = np.arange(0, time_per_line + 1, tick_interval)
-        ax.set_xticks(tick_locs)
-        ax.set_xticklabels([f'{int(t)}' for t in tick_locs])
-        ax.set_xlabel(f'Day {day}\nTime (s)', fontsize=8, fontweight='bold')
+
+        # Only show x-label on bottom subplot
+        if i == len(days) - 1:
+            ax.set_xlabel('Time (s)', fontsize=9, fontweight='bold')
 
     # Overall title
     fig.suptitle(f'{mouse} ({reward_group}) - Correlation Traces Across Days',
-                fontsize=11, fontweight='bold', y=0.98)
+                fontsize=11, fontweight='bold')
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout()
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -258,10 +264,8 @@ if __name__ == "__main__":
     print(f"\nMouse: {MOUSE}")
     print(f"Days: {DAYS}")
     print(f"Sampling rate: {SAMPLING_RATE} Hz")
-    print(f"Lines per subplot: {N_LINES_PER_SUBPLOT}")
     if TIME_WINDOW_PER_DAY is not None:
         print(f"Time window per day: {TIME_WINDOW_PER_DAY}s ({TIME_WINDOW_PER_DAY/60:.1f} min)")
-        print(f"Time per line: {TIME_WINDOW_PER_DAY/N_LINES_PER_SUBPLOT:.1f}s")
     else:
         print(f"Time window per day: Full trace")
 
@@ -306,7 +310,6 @@ if __name__ == "__main__":
         days=DAYS,
         sampling_rate=SAMPLING_RATE,
         time_window=TIME_WINDOW_PER_DAY,
-        n_lines=N_LINES_PER_SUBPLOT,
         save_path=svg_path
     )
 

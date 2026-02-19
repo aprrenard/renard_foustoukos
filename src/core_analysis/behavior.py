@@ -481,58 +481,139 @@ stat, p_value = mannwhitneyu(
 with open(os.path.join(output_dir, 'firsthit_D0_stats.csv'), 'w') as f:
     f.write(f'Mann-Whitney U Test: Statistic={stat}, P-value={p_value}')
  
-# Particle test plot.
-# -------------------
+# Particle test plots.
+# ---------------------
 
 table_path = r'//sv-nas1.rcp.epfl.ch/Petersen-Lab/analysis/Anthony_Renard/data_processed/behavior/behavior_particle_test.csv'
 table_path = io.adjust_path_to_host(table_path)
 table_particle_test = pd.read_csv(table_path)
 
-df = table_particle_test.loc[table_particle_test.reward_group=='R+']
-df['outcome_w'] = df['outcome_w'] * 100
-df = df.groupby(['mouse_id', 'behavior_type'])['outcome_w'].mean().reset_index()
+output_dir = io.adjust_path_to_host('/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/behavior')
+on_off_order = ['whisker_on_1', 'whisker_off', 'whisker_on_2']
 
-plt.figure(figsize=(4, 8))
-sns.barplot(data=df, x='behavior_type', y='outcome_w', order=['whisker_on_1', 'whisker_off', 'whisker_on_2'], color='#1b9e77')
-ax = plt.gca()
-   
-# Draw lines to connect each individual mouse across the three behavior types
-for mouse_id in df.mouse_id.unique():
-    a = df.loc[(df.mouse_id==mouse_id) & (df.behavior_type == 'whisker_on_1'), 'outcome_w'].to_numpy()[0]
-    b = df.loc[(df.mouse_id==mouse_id) & (df.behavior_type == 'whisker_off'), 'outcome_w'].to_numpy()[0]
-    plt.plot(['whisker_on_1', 'whisker_off'], [a,b], alpha=.8, color='grey', marker='', linewidth=1)
-    a = df.loc[(df.mouse_id==mouse_id) & (df.behavior_type == 'whisker_off'), 'outcome_w'].to_numpy()[0]
-    b = df.loc[(df.mouse_id==mouse_id) & (df.behavior_type == 'whisker_on_2'), 'outcome_w'].to_numpy()[0]
-    plt.plot(['whisker_off', 'whisker_on_2'], [a,b], alpha=.8, color='grey', marker='', linewidth=1)
-plt.xticks([0, 1, 2], ['ON', 'OFF', 'ON'])
-plt.ylabel('Lick probability (%)')
-plt.xlabel('Particle test')
+
+def pval_to_stars(p):
+    if p < 0.001: return '***'
+    elif p < 0.01: return '**'
+    elif p < 0.05: return '*'
+    return 'n.s.'
+
+
+def draw_stat_bracket(ax, x1, x2, y, p_value, h=3):
+    """Draw a significance bracket with stars between positions x1 and x2."""
+    ax.plot([x1, x1, x2, x2], [y, y + h, y + h, y], lw=0.8, color='black')
+    ax.text((x1 + x2) / 2, y + h, pval_to_stars(p_value),
+            ha='center', va='bottom', fontsize=8)
+
+
+def paired_wilcoxon(df, group_col, value_col, group1, group2):
+    """Wilcoxon signed-rank test on paired data sorted by mouse_id."""
+    g1 = df[df[group_col] == group1].sort_values('mouse_id')[value_col].values
+    g2 = df[df[group_col] == group2].sort_values('mouse_id')[value_col].values
+    stat, p = wilcoxon(g1, g2, alternative='two-sided')
+    return stat, p
+
+
+# ── Prepare data ─────────────────────────────────────────────────────────────
+df_w = table_particle_test.loc[table_particle_test.reward_group == 'R+'].copy()
+df_w['outcome_w'] = df_w['outcome_w'] * 100
+df_w = df_w.groupby(['mouse_id', 'behavior_type'])['outcome_w'].mean().reset_index()
+
+df_ns = table_particle_test.loc[table_particle_test.reward_group == 'R+'].copy()
+df_ns['outcome_c'] = df_ns['outcome_c'] * 100
+df_ns = df_ns.groupby(['mouse_id', 'behavior_type'])['outcome_c'].mean().reset_index()
+
+df_off = table_particle_test.loc[
+    (table_particle_test.reward_group == 'R+') &
+    (table_particle_test.behavior_type == 'whisker_off')
+].copy()
+df_off['outcome_w'] = df_off['outcome_w'] * 100
+df_off['outcome_c'] = df_off['outcome_c'] * 100
+df_off = df_off.groupby('mouse_id')[['outcome_w', 'outcome_c']].mean().reset_index()
+
+df_off_long = df_off.melt(id_vars='mouse_id', value_vars=['outcome_w', 'outcome_c'],
+                           var_name='trial_type', value_name='lick_rate')
+df_off_long['trial_type'] = df_off_long['trial_type'].map(
+    {'outcome_w': 'Whisker hit', 'outcome_c': 'False alarm'})
+
+# ── Stats ─────────────────────────────────────────────────────────────────────
+stat1, p1 = paired_wilcoxon(df_w,  'behavior_type', 'outcome_w', 'whisker_on_1', 'whisker_off')
+stat2, p2 = paired_wilcoxon(df_w,  'behavior_type', 'outcome_w', 'whisker_off',  'whisker_on_2')
+stat3, p3 = paired_wilcoxon(df_ns, 'behavior_type', 'outcome_c', 'whisker_on_1', 'whisker_off')
+stat4, p4 = paired_wilcoxon(df_ns, 'behavior_type', 'outcome_c', 'whisker_off',  'whisker_on_2')
+stat5, p5 = wilcoxon(df_off['outcome_w'].values, df_off['outcome_c'].values, alternative='two-sided')
+
+# ── Combined figure: 3 panels ─────────────────────────────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(10, 5), sharey=True)
+
+# Panel 1: whisker hit rate ON/OFF/ON
+ax = axes[0]
+sns.barplot(data=df_w, x='behavior_type', y='outcome_w', order=on_off_order,
+            color=trial_type_rew_palette[3], ax=ax)
+for mouse_id in df_w.mouse_id.unique():
+    v = {bt: df_w.loc[(df_w.mouse_id == mouse_id) & (df_w.behavior_type == bt), 'outcome_w'].to_numpy()
+         for bt in on_off_order}
+    if all(len(x) > 0 for x in v.values()):
+        ax.plot([0, 1], [v['whisker_on_1'][0], v['whisker_off'][0]], color='grey', linewidth=1, alpha=0.8)
+        ax.plot([1, 2], [v['whisker_off'][0], v['whisker_on_2'][0]], color='grey', linewidth=1, alpha=0.8)
+draw_stat_bracket(ax, 0, 1, 88, p1)
+draw_stat_bracket(ax, 1, 2, 88, p2)
+ax.set_xticks([0, 1, 2])
+ax.set_xticklabels(['ON', 'OFF', 'ON'])
+ax.set_ylim(0, 100)
+ax.set_ylabel('Lick rate (%)')
+ax.set_xlabel('Particle test')
+ax.set_title('Whisker hit rate')
+
+# Panel 2: no-stim false alarm rate ON/OFF/ON
+ax = axes[1]
+sns.barplot(data=df_ns, x='behavior_type', y='outcome_c', order=on_off_order,
+            color=trial_type_rew_palette[5], ax=ax)
+for mouse_id in df_ns.mouse_id.unique():
+    v = {bt: df_ns.loc[(df_ns.mouse_id == mouse_id) & (df_ns.behavior_type == bt), 'outcome_c'].to_numpy()
+         for bt in on_off_order}
+    if all(len(x) > 0 for x in v.values()):
+        ax.plot([0, 1], [v['whisker_on_1'][0], v['whisker_off'][0]], color='grey', linewidth=1, alpha=0.8)
+        ax.plot([1, 2], [v['whisker_off'][0], v['whisker_on_2'][0]], color='grey', linewidth=1, alpha=0.8)
+draw_stat_bracket(ax, 0, 1, 88, p3)
+draw_stat_bracket(ax, 1, 2, 88, p4)
+ax.set_xticks([0, 1, 2])
+ax.set_xticklabels(['ON', 'OFF', 'ON'])
+ax.set_ylim(0, 100)
+ax.set_xlabel('Particle test')
+ax.set_title('False alarm rate')
+
+# Panel 3: OFF only — whisker hit vs false alarm
+ax = axes[2]
+sns.barplot(data=df_off_long, x='trial_type', y='lick_rate',
+            order=['Whisker hit', 'False alarm'],
+            palette={'Whisker hit': trial_type_rew_palette[3],
+                     'False alarm': trial_type_rew_palette[5]},
+            ax=ax)
+for mouse_id in df_off.mouse_id.unique():
+    row = df_off[df_off.mouse_id == mouse_id]
+    ax.plot([0, 1], [row['outcome_w'].values[0], row['outcome_c'].values[0]],
+            color='grey', linewidth=1, alpha=0.8)
+draw_stat_bracket(ax, 0, 1, 88, p5)
+ax.set_ylim(0, 100)
+ax.set_xlabel('OFF period')
+ax.set_title('OFF: whisker vs FA')
+
 sns.despine()
-
-# Save figure.
-output_dir = '/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/behavior'
+plt.tight_layout()
 plt.savefig(os.path.join(output_dir, 'particle_test_imagingmice.svg'), dpi=300)
 
+# ── Save data and stats ───────────────────────────────────────────────────────
+table_particle_test.to_csv(os.path.join(output_dir, 'particle_test_imagingmice_data.csv'), index=False)
+df_off.to_csv(os.path.join(output_dir, 'particle_test_off_imagingmice_data.csv'), index=False)
 
-def test_significance(data, group_col, value_col, group1, group2):
-    group1_data = data[data[group_col] == group1][value_col]
-    group2_data = data[data[group_col] == group2][value_col]
-    stat, p_value = wilcoxon(group1_data, group2_data, alternative='two-sided')
-    return stat, p_value
-
-# Perform the test for whisker_on_1 vs whisker_off
-stat1, p_value1 = test_significance(df, 'behavior_type', 'outcome_w', 'whisker_on_1', 'whisker_off')
-# Perform the test for whisker_off vs whisker_on_2
-stat2, p_value2 = test_significance(df, 'behavior_type', 'outcome_w', 'whisker_off', 'whisker_on_2')
-
-# Save the dataframe and stats to CSV files
-save_path = '/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/behavior'
-save_path = io.adjust_path_to_host(save_path)
-table_particle_test.to_csv(os.path.join(save_path, 'particle_test_imagningmice_data.csv'), index=False)
-with open(os.path.join(save_path, 'particle_test_imagningmice_stats.csv'), 'w') as f:
-    f.write(f'whisker_on_1 vs whisker_off: Statistic: {stat1}, P-value: {p_value1}\n')
-    f.write(f'whisker_off vs whisker_on_2: Statistic: {stat2}, P-value: {p_value2}')
-    # Test significance with Wilcoxon signed-rank test
+pd.DataFrame([
+    {'comparison': 'whisker ON1 vs OFF',   'statistic': stat1, 'p_value': p1},
+    {'comparison': 'whisker OFF vs ON2',   'statistic': stat2, 'p_value': p2},
+    {'comparison': 'no-stim ON1 vs OFF',   'statistic': stat3, 'p_value': p3},
+    {'comparison': 'no-stim OFF vs ON2',   'statistic': stat4, 'p_value': p4},
+    {'comparison': 'OFF: whisker hit vs FA', 'statistic': stat5, 'p_value': p5},
+]).to_csv(os.path.join(output_dir, 'particle_test_imagingmice_stats.csv'), index=False)
 
 
 
@@ -682,6 +763,7 @@ def realign_to_first_hit(data):
     return pd.concat(realigned_data, ignore_index=True)
 
 df_realigned = realign_to_first_hit(df_non_realigned)
+df_realigned = df_realigned.loc[df_realigned.trial_w_realigned >= 0]
 df_realigned = df_realigned.loc[df_realigned.trial_w_realigned < max_trials_per_type]
 
 # Create 2x2 figure
@@ -842,8 +924,95 @@ for key, pvals in all_stats.items():
 
 
 
+# Performance during day 0: whisker, auditory, no-stim on a common time axis
+# ---------------------------------------------------------------------------
+# Single panel. R+ and R- share the same axis; color encodes stim type and
+# reward group. X-axis is time (min) from session start, cut at the 100th
+# whisker trial per mouse.
 
+table_file = io.adjust_path_to_host(r'/mnt/lsens-analysis/Anthony_Renard/data_processed/behavior/behavior_imagingmice_table_5days_cut_with_learning_curves.csv')
+table = pd.read_csv(table_file)
 
+day = 0
+df_day0 = table.loc[table.day == day].copy()
+
+stim_type_map = {
+    'whisker':  ('whisker_stim',  'learning_curve_w'),
+    'auditory': ('auditory_stim', 'learning_curve_a'),
+    'no_stim':  ('no_stim',       'learning_curve_ns'),
+}
+stim_labels = {'whisker': 'Whisker', 'auditory': 'Auditory', 'no_stim': 'No stim'}
+rg_stim_colors = {
+    'R+': {'whisker': behavior_palette[3], 'auditory': behavior_palette[1], 'no_stim': behavior_palette[5]},
+    'R-': {'whisker': behavior_palette[2], 'auditory': behavior_palette[0], 'no_stim': behavior_palette[4]},
+}
+
+time_resolution  = 5    # seconds
+max_whisker_trials = 100
+max_time = df_day0['stim_onset'].max()
+time_grid = np.arange(0, max_time + time_resolution, time_resolution)
+
+interp_records = []
+for mouse in df_day0['mouse_id'].unique():
+    mouse_data = df_day0[df_day0['mouse_id'] == mouse]
+    reward_group = mouse_data['reward_group'].iloc[0]
+
+    whisker_onsets = (mouse_data.loc[mouse_data['whisker_stim'] == 1, 'stim_onset']
+                      .dropna().sort_values().reset_index(drop=True))
+    if len(whisker_onsets) == 0:
+        continue
+    cutoff_time = whisker_onsets.iloc[min(max_whisker_trials, len(whisker_onsets)) - 1]
+
+    for stim_name, (stim_col, lc_col) in stim_type_map.items():
+        if lc_col not in mouse_data.columns:
+            continue
+        stim_data = mouse_data.loc[mouse_data[stim_col] == 1, ['stim_onset', lc_col]].dropna()
+        if len(stim_data) < 2:
+            continue
+
+        stim_times = stim_data['stim_onset'].values
+        lc_values  = stim_data[lc_col].values
+
+        t_mouse = time_grid[time_grid <= cutoff_time]
+        lc_interp = np.interp(t_mouse, stim_times, lc_values)
+
+        for t, lc in zip(t_mouse, lc_interp):
+            interp_records.append({
+                'mouse_id': mouse, 'reward_group': reward_group,
+                'stim_type': stim_name,
+                'time': t / 60,
+                'lick_probability': lc,
+            })
+
+df_interp = pd.DataFrame(interp_records)
+
+sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1)
+fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+
+for rg in ['R+', 'R-']:
+    df_rg = df_interp[df_interp['reward_group'] == rg]
+    for stim_name in ['whisker', 'auditory', 'no_stim']:
+        df_stim = df_rg[df_rg['stim_type'] == stim_name]
+        sns.lineplot(
+            data=df_stim, x='time', y='lick_probability',
+            color=rg_stim_colors[rg][stim_name],
+            errorbar='ci', err_style='band',
+            label=f'{stim_labels[stim_name]} {rg}', ax=ax,
+        )
+
+ax.set_xlabel('Time from session start (min)')
+ax.set_ylabel('Lick probability')
+ax.set_ylim([-0.1, 1.05])
+ax.set_xlim(right=50)
+
+sns.despine()
+plt.tight_layout()
+
+output_dir = io.adjust_path_to_host(r'/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/behavior')
+output_file = os.path.join(output_dir, 'performance_D0_all_stim_time_axis.svg')
+plt.savefig(output_file, format='svg', dpi=300)
+
+df_interp.to_csv(os.path.join(output_dir, 'performance_D0_all_stim_time_axis_data.csv'), index=False)
 
 # ############################################################
 # Muscimol inactivation.
@@ -1046,96 +1215,128 @@ pd.DataFrame(stats).to_csv(os.path.join(output_dir, 'muscimol_learning_day0_day1
 # Reaction time plot.
 # ###################
 
-# Read behavior results.
-db_path = io.db_path
-# db_path = 'C://Users//aprenard//recherches//fast-learning//docs//sessions_muscimol_GF.xlsx'
-nwb_dir = io.nwb_dir
-stop_flag_yaml = io.stop_flags_yaml
-trial_indices_yaml = io.trial_indices_yaml
+# Reaction time: per stim type across days (bar) + across day 0 trials (line)
+# ----------------------------------------------------------------------------
 
-experimenters = ['AR', 'GF', 'MI']
-mice_imaging = io.select_mice_from_db(db_path, nwb_dir,
-                                    experimenters = experimenters,
-                                    exclude_cols = ['exclude',  'two_p_exclude'],
-                                    optogenetic = ['no', np.nan],
-                                    pharmacology = ['no',np.nan],
-                                    )
-# Load the table from the CSV file.
 table_file = io.adjust_path_to_host(r'/mnt/lsens-analysis/Anthony_Renard/data_processed/behavior/behavior_imagingmice_table_5days_cut.csv')
 table = pd.read_csv(table_file)
 
-# Compute reaction time.
+table = table[table['lick_flag']==1]
+
 table['reaction_time'] = table['lick_time'] - table['stim_onset']
-table.loc[table.reaction_time>=1.25] = np.nan
+table = table.loc[(table['reaction_time'] > 0) & (table['reaction_time'] < 1.2)]
 
-table = table.loc[table.mouse_id.isin(mice_groups['gradual_day0'])]
+max_trials_rt = 100
 
+# Stim type definitions:
+#   (filter_col, outcome_col, trial_col, label, days_to_plot, rp_idx, rm_idx)
+# Color indices into trial_type_rew_palette / trial_type_nonrew_palette:
+#   [0]=auditory miss (cyan)  [1]=auditory hit (blue)
+#   [2]=whisker miss          [3]=whisker hit
+#   [4]=no-stim CR (grey)     [5]=no-stim FA (dark)
+# Auditory and no-stim share the same hit/CR colors in both palettes, so R-
+# uses the lighter (miss/CR) variant from the nonrew palette for contrast.
+stim_defs_rt = [
+    ('auditory_stim', 'outcome_a', 'trial_a', 'Auditory', [-2, -1, 0, 1, 2], 1, 0),
+    ('whisker_stim',  'outcome_w', 'trial_w', 'Whisker',  [-2, -1, 0, 1, 2],          3, 3),
+    ('no_stim',       'outcome_c', 'trial_c', 'No stim',  [-2, -1, 0, 1, 2], 5, 4),
+]
 
-# Plot reaction time histogram together with scatter
-# plot of reaction time for whisker trials across
-# the three days with trial_w on the x-axis and reaction_time on the y-axis.
-# --------------------------------------------------------------------------
+# ── Per-mouse mean reaction time per stim type × day (for bar plot) ──────────
+rt_rows = []
+for stim_col, outcome_col, trial_col, stim_label, days_plot, _, _ in stim_defs_rt:
+    df_stim = table.loc[(table[stim_col] == 1) & (table[outcome_col] == 1)]
+    for (mouse_id, reward_group, day), grp in df_stim.groupby(['mouse_id', 'reward_group', 'day']):
+        if day not in days_plot:
+            continue
+        rt_rows.append({
+            'mouse_id':      mouse_id,
+            'reward_group':  reward_group,
+            'day':           day,
+            'stim_type':     stim_label,
+            'reaction_time': grp['reaction_time'].mean(),
+        })
+rt_df = pd.DataFrame(rt_rows)
 
-binwidth = 0.05  # 50 ms bin width
-nwhiskertrials = 60
+# ── Bar plot: mean RT per stim type across days ───────────────────────────────
+sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1)
+fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=True)
 
-fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=True)
-data = table.loc[(table.reward_group=='R+') & (table.auditory_stim==1)] 
-for day in [0, 1, 2]:
-    day_data = data[data['day'] == day]
-    sns.histplot(day_data, x='reaction_time',
-                binwidth=binwidth, ax=axes[day], stat='probability', color='steelblue', alpha=0.7)
-data = table.loc[(table.reward_group=='R+') & (table.whisker_stim==1)] 
-for day in [0, 1, 2]:
-    day_data = data[data['day'] == day]
-    sns.histplot(day_data, x='reaction_time',
-                binwidth=binwidth, ax=axes[day], stat='probability', color='#1b9e77', alpha=0.7)
-# Plot reaction time for whisker trials as scatter, color-coded by trial_w (order in session)
-for day in [0, 1, 2]:
-    day_data = table[(table['reward_group'] == 'R+') & (table['whisker_stim'] == 1) & (table['day'] == day) & (table.trial_w <= nwhiskertrials)] 
-    if not day_data.empty:
-        cmap = cm.get_cmap('coolwarm', nwhiskertrials)
-        norm = Normalize(vmin=day_data['trial_w'].min(), vmax=day_data['trial_w'].max())
-        colors = cmap(norm(day_data['trial_w']))
-        axes[day].scatter(day_data['reaction_time'], np.random.normal(0.4, 0.03, size=len(day_data)), 
-                            c=colors, s=20, alpha=0.7, label='Whisker trials')
-        # Add colorbar
-        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        cbar = plt.colorbar(sm, ax=axes[day], orientation='vertical', pad=0.01)
-        cbar.set_label('Whisker trial order (trial_w)')
-        axes[day].set_title(f'Day {day}')
-# Save figure.
-output_dir = io.adjust_path_to_host(r'/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/behavior')
-plt.savefig(os.path.join(output_dir, f'reaction_time_histogram_{nwhiskertrials}.svg'), format='svg', dpi=300)
+for ax, (stim_col, outcome_col, trial_col, stim_label, days_plot, rpi, rmi) in zip(axes, stim_defs_rt):
+    color_rp = trial_type_rew_palette[rpi]
+    color_rm = trial_type_nonrew_palette[rmi]
+    palette  = {'R+': color_rp, 'R-': color_rm}
 
+    df_plot = rt_df[rt_df['stim_type'] == stim_label]
 
-# Plot reaction time to whisker trials across the three days with trial_w on the x-axis and reaction_time on the y-axis.
-mwhiskertrials = 40
-fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
-for i, day in enumerate([0, 1, 2]):
-    day_data = table[(table['reward_group'] == 'R+') & (table['whisker_stim'] == 1)
-                        & (table['day'] == day) & (table.trial_w <= nwhiskertrials)
-                        & (table.lick_flag == 1)]
-    day_data = day_data.assign(trial_whit_id=day_data.groupby('session_id').cumcount() + 1)
-    sns.pointplot(
-        data=day_data,
-        x='trial_whit_id',
-        y='reaction_time',
-        ax=axes[i],
-        dodge=True,
-        errorbar='ci',
-        markers='o',
-        linestyles='-',
+    sns.barplot(
+        data=df_plot, x='day', y='reaction_time',
+        hue='reward_group', hue_order=['R+', 'R-'],
+        palette=palette,
+        order=days_plot,
+        errorbar='ci', capsize=0.05,
+        alpha=0.8, ax=ax,
     )
-    axes[i].set_title(f'Day {day}')
+
+    # Individual mouse dots in grey
+    day_positions = {d: i for i, d in enumerate(days_plot)}
+    bar_width = 0.35
+    group_offsets = {'R+': -bar_width / 2, 'R-': bar_width / 2}
+
+    for mouse_id in df_plot['mouse_id'].unique():
+        mouse_data = df_plot[
+            (df_plot['mouse_id'] == mouse_id) & (df_plot['day'].isin(days_plot))
+        ].sort_values('day')
+        rg = mouse_data['reward_group'].iloc[0]
+        xs = [day_positions[d] + group_offsets[rg] for d in mouse_data['day']]
+        ax.scatter(xs, mouse_data['reaction_time'].values,
+                   color='grey', s=8, alpha=0.5, zorder=5, linewidths=0)
+
+    ax.set_title(stim_label)
+    ax.set_xlabel('Day')
+    ax.set_ylabel('Reaction time (s)' if ax is axes[0] else '')
+    ax.legend(frameon=False)
+
 sns.despine()
-# Save figure.
+plt.tight_layout()
 output_dir = io.adjust_path_to_host(r'/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/behavior')
-plt.savefig(os.path.join(output_dir, f'reaction_time_pointplot.svg'), format='svg', dpi=300)
+plt.savefig(os.path.join(output_dir, 'reaction_time_per_stim_across_days.svg'), format='svg', dpi=300)
+
+# ── Line plot: mean RT across trials within day 0 ────────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=True)
+
+for ax, (stim_col, outcome_col, trial_col, stim_label, _, rpi, rmi) in zip(axes, stim_defs_rt):
+    color_rp = trial_type_rew_palette[rpi]
+    color_rm = trial_type_nonrew_palette[rmi]
+
+    df_stim = table.loc[
+        (table[stim_col] == 1) &
+        (table[outcome_col] == 1) &
+        (table['day'] == 0) &
+        (table[trial_col] < max_trials_rt)
+    ]
+
+    for rg, color in [('R+', color_rp), ('R-', color_rm)]:
+        sns.lineplot(
+            data=df_stim[df_stim['reward_group'] == rg],
+            x=trial_col, y='reaction_time',
+            color=color, errorbar='ci', err_style='band',
+            label=rg, ax=ax,
+        )
+
+    ax.set_title(stim_label)
+    ax.set_xlabel(f'Trial number')
+    ax.set_ylabel('Reaction time (s)' if ax is axes[0] else '')
+    ax.legend(frameon=False)
+
+sns.despine()
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'reaction_time_day0_per_stim_line.svg'), format='svg', dpi=300)
 
 
 
+
+sns.displot(table.loc[(table.reward_group=='R+') & (table.auditory_stim==1) & (table.day==0), 'reaction_time'], bins=20, ax=axes[0], color='steelblue')
 
 # ############################################################
 # Opto inactivation.
@@ -1443,3 +1644,118 @@ def plot_learning_curves_pdf(table, session_list, pdf_path):
             plt.close()
 
 plot_learning_curves_pdf(table, session_list, pdf_path)
+
+
+# Distribution of learning trials across mice (day 0).
+# ------------------------------------------------------
+
+output_dir = io.adjust_path_to_host(
+    r'/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/day0_learning/behavior'
+)
+
+# One row per session, day 0 only, take first row (learning_trial is session-level).
+day0 = (
+    table[table.day == 0]
+    .groupby('session_id', as_index=False)
+    .first()[['session_id', 'mouse_id', 'reward_group', 'learning_trial']]
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(7, 3), sharey=True)
+for ax, rg, color in zip(axes, ['R+', 'R-'], [reward_palette[1], reward_palette[0]]):
+    data_rg = day0[day0.reward_group == rg]['learning_trial'].dropna()
+    bin_edges = np.arange(0, data_rg.max() + 5, 5) if len(data_rg) > 0 else 15
+    ax.hist(data_rg, bins=bin_edges, color=color, edgecolor='white')
+    n_learned = len(data_rg)
+    n_total = (day0.reward_group == rg).sum()
+    ax.set_title(f'{rg}  (n learned = {n_learned} / {n_total})')
+    ax.set_xlabel('Learning trial (whisker)')
+    ax.set_ylabel('Number of mice')
+    sns.despine(ax=ax)
+fig.tight_layout()
+fig.savefig(
+    os.path.join(output_dir, 'learning_trial_distribution_day0.svg'),
+    format='svg', dpi=300
+)
+
+# Example learning curves for two mice (day 0).
+# -----------------------------------------------
+
+example_mice = {'R+': 'GF305', 'R-': 'AR180'}
+fig, axes = plt.subplots(1, 2, figsize=(8, 3.5))
+
+for ax, (rg, mouse_id) in zip(axes, example_mice.items()):
+    color = reward_palette[1] if rg == 'R+' else reward_palette[0]
+
+    session_row = table[(table.mouse_id == mouse_id) & (table.day == 0)]
+
+    d = session_row[session_row.whisker_stim == 1].reset_index(drop=True)
+    d = d.loc[d.trial_w < 100]  # Limit to first 100 whisker trials for better visualization
+
+    learning_curve_w = d.learning_curve_w.values.astype(float)
+    learning_ci_low  = d.learning_curve_w_ci_low.values.astype(float)
+    learning_ci_high = d.learning_curve_w_ci_high.values.astype(float)
+    learning_chance  = d.learning_curve_chance.values.astype(float)
+
+    ax.plot(d.trial_w, learning_curve_w, color=color, linewidth=2,
+            label='Fitted curve')
+    ax.fill_between(d.trial_w, learning_ci_low, learning_ci_high,
+                    color=color, alpha=0.2, label='80% CI')
+    ax.plot(d.trial_w, learning_chance, color=stim_palette[2], linewidth=1.5,
+            label='False alarm rate')
+
+    learning_trial = session_row.learning_trial.values[0]
+    if not pd.isna(learning_trial):
+        ax.axvline(x=learning_trial, color='black', linestyle='--', linewidth=1,
+                   label=f'Learning trial ({int(learning_trial)})')
+
+    ax.set_ylim([0, 1])
+    ax.set_xlabel('Whisker trial')
+    ax.set_ylabel('Lick probability')
+    ax.set_title(f'{mouse_id} – {rg}')
+    ax.legend(frameon=False, fontsize=7)
+    sns.despine(ax=ax)
+
+fig.tight_layout()
+fig.savefig(
+    os.path.join(output_dir, 'example_learning_curves_day0.svg'),
+    format='svg', dpi=300
+)
+
+
+
+# # Debug: day 0 performance for mice without a detected learning trial.
+# # ---------------------------------------------------------------------
+
+# no_learning = day0[day0.learning_trial.isna()]
+
+# for rg in ['R+', 'R-']:
+#     mice_no_learning = no_learning[no_learning.reward_group == rg].mouse_id.values
+#     if len(mice_no_learning) == 0:
+#         continue
+
+#     color = reward_palette[1] if rg == 'R+' else reward_palette[0]
+#     ncols = len(mice_no_learning)
+#     fig, axes = plt.subplots(1, ncols, figsize=(4 * ncols, 3.5), sharey=True)
+#     if ncols == 1:
+#         axes = [axes]
+
+#     for ax, mouse_id in zip(axes, mice_no_learning):
+#         session_row = table[(table.mouse_id == mouse_id) & (table.day == 0)]
+#         d = session_row[session_row.whisker_stim == 1].reset_index(drop=True)
+
+#         ax.plot(d.trial_w, d.learning_curve_w.values.astype(float),
+#                 color=color, linewidth=2, label='Fitted curve')
+#         ax.fill_between(d.trial_w,
+#                         d.learning_curve_w_ci_low.values.astype(float),
+#                         d.learning_curve_w_ci_high.values.astype(float),
+#                         color=color, alpha=0.2)
+#         ax.plot(d.trial_w, d.learning_curve_chance.values.astype(float),
+#                 color=stim_palette[2], linewidth=1.5, label='Chance (no-stim)')
+#         ax.set_ylim([0, 1])
+#         ax.set_xlabel('Whisker trial')
+#         ax.set_ylabel('Lick probability')
+#         ax.set_title(f'{mouse_id} – {rg} – no learning trial')
+#         ax.legend(frameon=False, fontsize=7)
+#         sns.despine(ax=ax)
+
+#     fig.tight_layout()
