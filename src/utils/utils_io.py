@@ -133,14 +133,28 @@ def read_stop_flags_and_indices_yaml(stop_flag_yaml_path, trial_indices_path):
     return stop_flags, trial_indices
 
 
+
 def adjust_path_to_host(path):
+    import platform
     host = os.popen('hostname').read().strip()
     if 'haas' in host:
+        # Linux analysis server: use /mnt mount points.
         if '//sv-nas1.rcp.epfl.ch/Petersen-Lab/analysis' in path:
             path = path.replace('//sv-nas1.rcp.epfl.ch/Petersen-Lab/analysis', '/mnt/lsens-analysis')
         elif '//sv-nas1.rcp.epfl.ch/Petersen-Lab/data' in path:
             path = path.replace('//sv-nas1.rcp.epfl.ch/Petersen-Lab/data', '/mnt/lsens-data')
+    elif platform.system() == 'Darwin':
+        # macOS: server mounted under /Volumes/Petersen-Lab/.
+        if '//sv-nas1.rcp.epfl.ch/Petersen-Lab/analysis' in path:
+            path = path.replace('//sv-nas1.rcp.epfl.ch/Petersen-Lab/analysis', '/Volumes/Petersen-Lab/analysis')
+        elif '//sv-nas1.rcp.epfl.ch/Petersen-Lab/data' in path:
+            path = path.replace('//sv-nas1.rcp.epfl.ch/Petersen-Lab/data', '/Volumes/Petersen-Lab/data')
+        elif '/mnt/lsens-analysis' in path:
+            path = path.replace('/mnt/lsens-analysis', '/Volumes/Petersen-Lab/analysis')
+        elif '/mnt/lsens-data' in path:
+            path = path.replace('/mnt/lsens-data', '/Volumes/Petersen-Lab/data')
     else:
+        # Windows or other: use UNC paths.
         if '/mnt/lsens-analysis' in path:
             path = path.replace('/mnt/lsens-analysis', '//sv-nas1.rcp.epfl.ch/Petersen-Lab/analysis')
         elif '/mnt/lsens-data' in path:
