@@ -1222,9 +1222,14 @@ table_file = io.adjust_path_to_host(r'/mnt/lsens-analysis/Anthony_Renard/data_pr
 table = pd.read_csv(table_file)
 
 table = table[table['lick_flag']==1]
+# Reindex with iht trials only.
+table['trial_w'] = table.groupby(['mouse_id', 'session_id', 'trial_type']).cumcount()
+table['trial_a'] = table.groupby(['mouse_id', 'session_id', 'trial_type']).cumcount()
+table['trial_c'] = table.groupby(['mouse_id', 'session_id', 'trial_type']).cumcount()
+
+
 
 table['reaction_time'] = table['lick_time'] - table['stim_onset']
-table = table.loc[(table['reaction_time'] > 0) & (table['reaction_time'] < 1.2)]
 
 max_trials_rt = 100
 
@@ -1249,6 +1254,8 @@ for stim_col, outcome_col, trial_col, stim_label, days_plot, _, _ in stim_defs_r
     for (mouse_id, reward_group, day), grp in df_stim.groupby(['mouse_id', 'reward_group', 'day']):
         if day not in days_plot:
             continue
+
+
         rt_rows.append({
             'mouse_id':      mouse_id,
             'reward_group':  reward_group,
@@ -1317,26 +1324,33 @@ for ax, (stim_col, outcome_col, trial_col, stim_label, _, rpi, rmi) in zip(axes,
     ]
 
     for rg, color in [('R+', color_rp), ('R-', color_rm)]:
+        df_rg = df_stim[df_stim['reward_group'] == rg]
+        mouse_counts = df_rg.groupby(trial_col)['mouse_id'].nunique()
+        valid_trials = mouse_counts[mouse_counts >= 5].index
+        df_rg = df_rg[df_rg[trial_col].isin(valid_trials)]
         sns.lineplot(
-            data=df_stim[df_stim['reward_group'] == rg],
+            data=df_rg,
             x=trial_col, y='reaction_time',
             color=color, errorbar='ci', err_style='band',
             label=rg, ax=ax,
         )
+        # mouse_means = df_rg.groupby(['mouse_id', trial_col])['reaction_time'].mean().reset_index()
+        # ax.scatter(
+        #     mouse_means[trial_col], mouse_means['reaction_time'],
+        #     color=color, s=8, alpha=0.3, zorder=3, linewidths=0,
+        # )
 
     ax.set_title(stim_label)
-    ax.set_xlabel(f'Trial number')
+    ax.set_xlabel('Hit trials')
     ax.set_ylabel('Reaction time (s)' if ax is axes[0] else '')
+    ax.set_ylim(bottom=0, top=1)
+
     ax.legend(frameon=False)
 
 sns.despine()
 plt.tight_layout()
 plt.savefig(os.path.join(output_dir, 'reaction_time_day0_per_stim_line.svg'), format='svg', dpi=300)
 
-
-
-
-sns.displot(table.loc[(table.reward_group=='R+') & (table.auditory_stim==1) & (table.day==0), 'reaction_time'], bins=20, ax=axes[0], color='steelblue')
 
 # ############################################################
 # Opto inactivation.

@@ -79,10 +79,7 @@ def detect_piezo_lick_times(
 # ============================================================================
 
 def generate_panel(
-    mouse_id='GF305',
-    session_date='29112020',
-    session_time='103331',
-    data_root='/mnt/lsens-data',
+    results_file=os.path.join(io.processed_dir, 'behavior', 'GF305_29112020_103331_results.txt'),
     save_path=OUTPUT_DIR,
     save_format='svg',
     dpi=300
@@ -94,19 +91,13 @@ def generate_panel(
     and no-stimulus trials to illustrate the task structure.
 
     Args:
-        mouse_id: Mouse identifier
-        session_date: Session date (DDMMYYYY format)
-        session_time: Session time (HHMMSS format)
-        data_root: Root directory for raw data
+        results_file: Path to the preprocessed Results.txt file
         save_path: Directory to save output figure
         save_format: Figure format ('svg', 'png', 'pdf')
         dpi: Resolution for saved figure
     """
 
-    # Construct file paths
-    session_folder = f"{mouse_id}_{session_date}_{session_time}"
-    behavior_path = os.path.join(data_root, mouse_id, 'Recordings', 'BehaviourFiles', session_folder)
-    results_file = os.path.join(behavior_path, 'Results.txt')
+    results_file = io.adjust_path_to_host(results_file)
 
     # Load behavioral results
     df_results = pd.read_csv(results_file, sep=r'\s+', engine='python')
@@ -134,7 +125,8 @@ def generate_panel(
             continue
 
         # Load and process lick trace
-        lick_file = os.path.join(behavior_path, f"LickTrace{int(trial['trialnumber'])}.bin")
+        lick_traces_dir = io.adjust_path_to_host(os.path.join(io.processed_dir, 'behavior', 'GF305_lick_traces'))
+        lick_file = os.path.join(lick_traces_dir, f"LickTrace{int(trial['trialnumber'])}.bin")
         lick_trace = np.fromfile(lick_file)[1::2]
 
         lick_times = detect_piezo_lick_times(

@@ -72,7 +72,7 @@ OUTPUT_DIR = os.path.join(io.manuscript_output_dir, 'supp_4', 'output')
 FOLDER = os.path.join(io.solve_common_paths('processed_data'), 'mice')
 
 # Execution mode
-MODE = 'compute'
+MODE = 'plot'
 
 
 # ============================================================================
@@ -344,6 +344,16 @@ def panel_supp4a_scatter(
         <filename>_data.csv  -- data used for the plot
         <filename>_stats.csv -- Pearson r and p per reward group
     """
+
+    lmi_cmap = mcolors.LinearSegmentedColormap.from_list(
+    'blue_grey_red',
+    [
+        (0.0,  (0.0,  0.0, 1.0)),   # bright blue
+        (0.5,  (0.7, 0.7, 0.7)),  # mid-grey centre
+        (1.0,  (1.0,  0.0,  0.0)),   # bright red
+    ]
+    )
+
     sns.set_theme(context='paper', style='ticks', palette='deep',
                   font='sans-serif', font_scale=1)
 
@@ -370,7 +380,7 @@ def panel_supp4a_scatter(
 
         sc = ax.scatter(
             gdata['transient_freq'], gdata['participation_rate'],
-            c=gdata['lmi'], cmap='coolwarm', norm=norm,
+            c=gdata['lmi'], cmap=lmi_cmap, norm=norm,
             alpha=0.6, s=15, linewidths=0,
         )
 
@@ -486,7 +496,7 @@ def panel_supp4b_partial_corr(
                 bbox=dict(boxstyle='round', facecolor='white',
                           alpha=0.9, edgecolor='gray'))
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharey=True)
     stats_rows = []
     data_rows = []
 
