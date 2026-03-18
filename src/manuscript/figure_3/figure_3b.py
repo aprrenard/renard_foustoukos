@@ -1,344 +1,167 @@
 """
-Figure 3b: Grand average PSTHs across learning days
+Raster plot of single-cell PSTH activity across learning days for GF314.
 
-This script generates Panel b for Figure 3, showing peri-stimulus time histograms
-(PSTHs) averaged across mice for different learning days. Includes plots for:
-- All cells combined
-- Projection-specific neurons (wS2, wM1)
+Displays all cells ordered by LMI (significant only) across learning days.
 """
 
 import os
 import sys
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+from matplotlib.gridspec import GridSpec
 
-sys.path.append('/home/aprenard/repos/fast-learning')
-import src.utils.utils_imaging as utils_imaging
+sys.path.append(r'/home/aprenard/repos/fast-learning')
+sys.path.append(r'/home/aprenard/repos/NWB_analysis')
 import src.utils.utils_io as io
-from src.utils.utils_plot import reward_palette
+import src.utils.utils_imaging as utils_imaging
 
 
-OUTPUT_DIR = os.path.join(io.manuscript_output_dir, 'figure_3', 'output')
+# #############################################################################
+# Parameters.
+# #############################################################################
+
+sampling_rate = 30
+win_sec = (-0.5, 1.5)
+baseline_win = (0, 1)
+baseline_win = (int(baseline_win[0] * sampling_rate), int(baseline_win[1] * sampling_rate))
+days = [-2, -1, 0, 1, 2]
+days_str = ['Day -2', 'Day -1', 'Day 0', 'Day +1', 'Day +2']
+
+OUTPUT_DIR = io.adjust_path_to_host(
+    '/mnt/lsens-analysis/Anthony_Renard/manuscript/outputs/figure_3/output'
+)
 
 
-# ============================================================================
-# Data Loading and Processing
-# ============================================================================
+# #############################################################################
+# Load LMI data.
+# #############################################################################
 
-def load_and_process_psth_data(
-    mice=None,
-    days=[-2, -1, 0, 1, 2],
-    win_sec=(-0.5, 1.5),
-    baseline_win=(0, 1),
-    sampling_rate=30,
-    file_name='tensor_xarray_mapping_data.nc'
-):
-    """
-    Load and process PSTH data from xarray files for all mice.
+lmi_df = pd.read_csv(os.path.join(io.processed_dir, 'lmi_results.csv'))
 
-    Args:
-        mice: List of mouse IDs (if None, will query from database)
-        days: List of day indices relative to learning day 0
-        win_sec: Time window for PSTH (seconds)
-        baseline_win: Baseline window for subtraction (seconds)
-        sampling_rate: Imaging sampling rate (Hz)
-        file_name: Name of xarray file containing imaging data
 
-    Returns:
-        psth: DataFrame with columns [mouse_id, day, time, roi, cell_type, psth, reward_group]
-    """
+# #############################################################################
+# Single session raster (all cells ordered by LMI).
+# #############################################################################
 
-    # Get mouse list from database if not provided
-    if mice is None:
-        _, _, mice, db = io.select_sessions_from_db(
-            io.db_path,
-            io.nwb_dir,
-            two_p_imaging='yes',
-            experimenters=['AR', 'GF', 'MI']
-        )
+session_mouse_id = 'GF314'
+use_significant_only = True  # If True, only include cells with significant LMI
 
-    # Convert baseline window to samples
-    baseline_win_samples = (
-        int(baseline_win[0] * sampling_rate),
-        int(baseline_win[1] * sampling_rate)
+print(f"\nCreating raster for cells from {session_mouse_id} ordered by LMI...")
+
+# Get LMI values for this mouse
+mouse_lmi = lmi_df[lmi_df['mouse_id'] == session_mouse_id][['roi', 'lmi', 'lmi_p']].copy()
+
+# Filter to significant LMI cells if requested
+if use_significant_only:
+    mouse_lmi = mouse_lmi.loc[(mouse_lmi['lmi_p'] >= 0.975) | (mouse_lmi['lmi_p'] <= 0.025)]  # Keep only lmi_p == 1 or lmi_p == -1
+
+mouse_lmi = mouse_lmi.sort_values('lmi', ascending=False)  # Positive on top
+print(f"Found {len(mouse_lmi)} cells with LMI data for {session_mouse_id}")
+
+# Load activity data for this mouse
+file_name = 'tensor_xarray_mapping_data.nc'
+folder = os.path.join(io.processed_dir, 'mice')
+xarr = utils_imaging.load_mouse_xarray(session_mouse_id, folder, file_name)
+xarr = utils_imaging.substract_baseline(xarr, 2, baseline_win)
+
+xarr = xarr.sel(trial=xarr['day'].isin(days))
+xarr = xarr.sel(time=slice(win_sec[0], win_sec[1]))
+xarr = xarr.groupby('day').mean(dim='trial')
+
+xarr.name = 'psth'
+session_df = xarr.to_dataframe().reset_index()
+session_df['mouse_id'] = session_mouse_id
+
+# Merge with LMI data to get ordering
+session_df = session_df.merge(mouse_lmi, on='roi')
+
+# Create cell identifier for ordering
+session_df['cell_id'] = session_df['roi'].astype(str)
+
+# Get ordered cell list (by LMI, descending)
+session_cell_order = mouse_lmi['roi'].astype(str).tolist()
+
+# Get time points
+session_time_points = np.sort(session_df['time'].unique())
+
+# Create data matrices for each day (cells x time)
+session_raster_data = {}
+for day in days:
+    day_data = session_df[session_df['day'] == day]
+
+    pivot = day_data.pivot_table(
+        index='cell_id',
+        columns='time',
+        values='psth',
+        aggfunc='mean'
     )
 
-    # Load data for each mouse
-    psth_list = []
+    # Reorder rows by LMI (positive on top)
+    pivot = pivot.reindex(session_cell_order)
 
-    for mouse_id in mice:
-        reward_group = io.get_mouse_reward_group_from_db(io.db_path, mouse_id)
+    # Convert to percent DF/F0
+    session_raster_data[day] = pivot.values * 100
 
-        # Load xarray data
-        folder = os.path.join(io.processed_dir, 'mice')
-        xarr = utils_imaging.load_mouse_xarray(mouse_id, folder, file_name)
+# Determine color scale
+session_vmax = np.percentile(np.concatenate([session_raster_data[d].flatten() for d in days]), 98)
+session_vmin = 0
 
-        # Subtract baseline
-        xarr = utils_imaging.substract_baseline(xarr, 2, baseline_win_samples)
+# Create figure
+fig = plt.figure(figsize=(7.5, 4))
+gs = GridSpec(1, 6, width_ratios=[1, 1, 1, 1, 1, 0.08], wspace=0.08)
 
-        # Filter for days of interest
-        xarr = xarr.sel(trial=xarr['day'].isin(days))
+axes = [fig.add_subplot(gs[0, i]) for i in range(5)]
+cbar_ax = fig.add_subplot(gs[0, 5])
 
-        # Select time window
-        xarr = xarr.sel(time=slice(win_sec[0], win_sec[1]))
+# Plot rasters for each day
+for i, day in enumerate(days):
+    ax = axes[i]
 
-        # Average across trials for each day
-        xarr = xarr.groupby('day').mean(dim='trial')
-
-        # Convert to dataframe
-        xarr.name = 'psth'
-        xarr_df = xarr.to_dataframe().reset_index()
-        xarr_df['mouse_id'] = mouse_id
-        xarr_df['reward_group'] = reward_group
-
-        psth_list.append(xarr_df)
-
-    psth = pd.concat(psth_list)
-
-    return psth
-
-
-# ============================================================================
-# Panel b1: All cells PSTH
-# ============================================================================
-
-def panel_b1_psth_all_cells(
-    psth=None,
-    days=[-2, -1, 0, 1, 2],
-    min_cells=3,
-    variance='mice',
-    save_path=OUTPUT_DIR,
-    save_format='svg',
-    dpi=300
-):
-    """
-    Generate Figure 3 Panel b1: PSTH for all cells across learning days.
-
-    Shows average PSTH across all cell types for R+ and R- reward groups
-    across 5 days of training.
-
-    Args:
-        psth: Pre-loaded PSTH dataframe (if None, will load)
-        days: List of day indices to plot
-        min_cells: Minimum number of cells per mouse to include
-        variance: 'mice' to average by mouse first, 'cells' to average cells directly
-        save_path: Directory to save output figure and data
-        save_format: Figure format ('svg', 'png', 'pdf')
-        dpi: Resolution for saved figure
-    """
-
-    # Load data if not provided
-    if psth is None:
-        psth = load_and_process_psth_data(days=days)
-
-    # Filter mice with minimum cell count
-    if variance == "mice":
-        psth_filtered = utils_imaging.filter_data_by_cell_count(psth, min_cells)
-        # Average across all cells (ignore cell_type)
-        data_allcells = psth_filtered.groupby(
-            ['mouse_id', 'day', 'reward_group', 'time']
-        )['psth'].mean().reset_index()
-    else:
-        # Average by cell first, then by mouse
-        data_allcells = psth.groupby(
-            ['mouse_id', 'day', 'reward_group', 'time', 'roi']
-        )['psth'].mean().reset_index()
-        data_allcells = data_allcells.groupby(
-            ['mouse_id', 'day', 'reward_group', 'time']
-        )['psth'].mean().reset_index()
-
-    # Convert to percent dF/F0
-    data_allcells['psth'] = data_allcells['psth'] * 100
-
-    # Set plotting theme
-    sns.set_theme(
-        context='paper',
-        style='ticks',
-        palette='deep',
-        font='sans-serif',
-        font_scale=1
+    im = ax.imshow(
+        session_raster_data[day],
+        aspect='auto',
+        cmap='Reds',
+        vmin=session_vmin,
+        vmax=session_vmax,
+        extent=[session_time_points[0], session_time_points[-1], len(session_cell_order), 0],
+        interpolation='nearest'
     )
 
-    # Create figure
-    fig, axes = plt.subplots(1, len(days), figsize=(18, 5), sharey=True)
+    # Add stimulus onset line
+    ax.axvline(0, color='#FF9600', linestyle='-', linewidth=1.2)
 
-    # Plot each day
-    for j, day in enumerate(days):
-        d = data_allcells.loc[data_allcells['day'] == day]
-        sns.lineplot(
-            data=d,
-            x='time',
-            y='psth',
-            errorbar='ci',
-            hue='reward_group',
-            hue_order=['R-', 'R+'],
-            palette=reward_palette,
-            estimator='mean',
-            ax=axes[j],
-            legend=False
-        )
-        axes[j].axvline(0, color='#FF9600', linestyle='-')
-        axes[j].set_title(f'Day {day} - All Cells')
-        axes[j].set_ylabel('DF/F0 (%)')
-        axes[j].set_xlabel('Time (s)')
+    # Title
+    ax.set_title(days_str[i], fontsize=10)
 
-    plt.ylim(-1, 12)
-    plt.tight_layout()
-    sns.despine()
+    # X-axis
+    if i == 2:
+        ax.set_xlabel('Time (s)', fontsize=9)
+    ax.set_xticks([-0.5, 0, 0.5, 1, 1.5])
+    ax.tick_params(axis='x', labelsize=8)
 
-    # Save figure and data
-    os.makedirs(save_path, exist_ok=True)
+    # Y-axis
+    if i == 0:
+        ax.set_ylabel('Cells (by LMI)', fontsize=9)
+    ax.set_yticks([])
 
-    output_file = os.path.join(
-        save_path,
-        f'figure_3b_all_cells_{variance}.{save_format}'
-    )
-    plt.savefig(output_file, format=save_format, dpi=dpi, bbox_inches='tight')
-    plt.close()
+# Add colorbar
+cbar = fig.colorbar(im, cax=cbar_ax)
+cbar.set_label('DF/F0 (%)', fontsize=9)
+cbar.ax.tick_params(labelsize=8)
 
-    # Save data
-    data_file = os.path.join(save_path, f'figure_3b_all_cells_{variance}_data.csv')
-    data_allcells.to_csv(data_file, index=False)
-
-    print(f"Figure 3b (all cells) saved to: {output_file}")
-    print(f"Figure 3b (all cells) data saved to: {data_file}")
+plt.tight_layout()
 
 
-# ============================================================================
-# Panel b2: Projection-specific PSTH
-# ============================================================================
+# #############################################################################
+# Save.
+# #############################################################################
 
-def panel_b2_psth_projection_types(
-    psth=None,
-    days=[-2, -1, 0, 1, 2],
-    min_cells=3,
-    variance='mice',
-    projection_types=['wS2', 'wM1'],
-    save_path=OUTPUT_DIR,
-    save_format='svg',
-    dpi=300
-):
-    """
-    Generate Figure 3 Panel b2: PSTH for projection-specific neurons.
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+sig_suffix = '_significant' if use_significant_only else '_all'
+out_path = os.path.join(OUTPUT_DIR, f'psth_raster_{session_mouse_id}{sig_suffix}.svg')
+fig.savefig(out_path, format='svg', dpi=300, bbox_inches='tight')
+print(f"\nSaved: {out_path}")
 
-    Shows average PSTH for wS2 and wM1 projection neurons separately
-    for R+ and R- reward groups across 5 days of training.
-
-    Args:
-        psth: Pre-loaded PSTH dataframe (if None, will load)
-        days: List of day indices to plot
-        min_cells: Minimum number of cells per mouse to include
-        variance: 'mice' to average by mouse first, 'cells' to average cells directly
-        projection_types: List of cell types to plot
-        save_path: Directory to save output figure and data
-        save_format: Figure format ('svg', 'png', 'pdf')
-        dpi: Resolution for saved figure
-    """
-
-    # Load data if not provided
-    if psth is None:
-        psth = load_and_process_psth_data(days=days)
-
-    # Filter for projection types and minimum cell count
-    if variance == "mice":
-        psth_filtered = utils_imaging.filter_data_by_cell_count(psth, min_cells)
-        data_ctype = psth_filtered[psth_filtered['cell_type'].isin(projection_types)]
-        data_ctype = data_ctype.groupby(
-            ['mouse_id', 'day', 'reward_group', 'time', 'cell_type']
-        )['psth'].mean().reset_index()
-    else:
-        data_ctype = psth[psth['cell_type'].isin(projection_types)]
-        data_ctype = data_ctype.groupby(
-            ['mouse_id', 'day', 'reward_group', 'time', 'cell_type', 'roi']
-        )['psth'].mean().reset_index()
-        data_ctype = data_ctype.groupby(
-            ['mouse_id', 'day', 'reward_group', 'time', 'cell_type']
-        )['psth'].mean().reset_index()
-
-    # Convert to percent dF/F0
-    data_ctype['psth'] = data_ctype['psth'] * 100
-
-    # Set plotting theme
-    sns.set_theme(
-        context='paper',
-        style='ticks',
-        palette='deep',
-        font='sans-serif',
-        font_scale=1
-    )
-
-    # Create figure
-    fig, axes = plt.subplots(
-        len(projection_types), len(days),
-        figsize=(18, 10),
-        sharey=True
-    )
-
-    # Plot each cell type and day
-    for i, cell_type in enumerate(projection_types):
-        for j, day in enumerate(days):
-            d = data_ctype[
-                (data_ctype['cell_type'] == cell_type) &
-                (data_ctype['day'] == day)
-            ]
-            sns.lineplot(
-                data=d,
-                x='time',
-                y='psth',
-                errorbar='ci',
-                hue='reward_group',
-                hue_order=['R-', 'R+'],
-                palette=reward_palette,
-                estimator='mean',
-                ax=axes[i, j],
-                legend=False
-            )
-            axes[i, j].axvline(0, color='#FF9600', linestyle='-')
-            axes[i, j].set_title(f'{cell_type} - Day {day}')
-            axes[i, j].set_ylabel('DF/F0 (%)')
-            axes[i, j].set_xlabel('Time (s)')
-
-    plt.ylim(-1, 16)
-    plt.tight_layout()
-    sns.despine()
-
-    # Save figure and data
-    os.makedirs(save_path, exist_ok=True)
-
-    output_file = os.path.join(
-        save_path,
-        f'figure_3b_projection_types_{variance}.{save_format}'
-    )
-    plt.savefig(output_file, format=save_format, dpi=dpi, bbox_inches='tight')
-    plt.close()
-
-    # Save data
-    data_file = os.path.join(
-        save_path,
-        f'figure_3b_projection_types_{variance}_data.csv'
-    )
-    data_ctype.to_csv(data_file, index=False)
-
-    print(f"Figure 3b (projection types) saved to: {output_file}")
-    print(f"Figure 3b (projection types) data saved to: {data_file}")
-
-
-# ============================================================================
-# Main execution
-# ============================================================================
-
-if __name__ == '__main__':
-    # Load data once
-    print("Loading PSTH data...")
-    psth = load_and_process_psth_data()
-
-    # Generate both panels
-    print("\nGenerating panel b1 (all cells)...")
-    panel_b1_psth_all_cells(psth=psth)
-
-    print("\nGenerating panel b2 (projection types)...")
-    panel_b2_psth_projection_types(psth=psth)
-
-    print("\nDone!")
+plt.show()

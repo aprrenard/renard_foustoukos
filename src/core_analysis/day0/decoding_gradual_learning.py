@@ -1006,7 +1006,6 @@ plt.tight_layout()
 sns.despine()
 
 plt.savefig(os.path.join(output_dir_gradual, 'progressive_learning_individual_mice_summary.svg'), format='svg', dpi=300)
-plt.savefig(os.path.join(output_dir_gradual, 'progressive_learning_individual_mice_summary.png'), format='png', dpi=300)
 print(f"Saved: progressive_learning_individual_mice_summary figure")
 
 

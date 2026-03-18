@@ -1,21 +1,22 @@
 """
-Supplementary Figure 4c: Participation rate across days for significantly-
-participating cells (LMI+ vs LMI-).
+Supplementary Figure 4d: Proportion of cells participating in reactivation
+across days for LMI+ vs LMI- cells (binary participation).
 
-Cells are classified as 'significantly participating' via circular-shift
-control: circular-shift null distribution (N_SHIFTS shifts) is built per
-mouse x day, and a cell is retained if its day-0 participation rate exceeds
-the SIGNIFICANCE_PCTILE-th percentile of its null distribution.
+Binary participation is determined by circular-shift control: a cell x day is
+classified as 'participating' if the cell's real participation rate around
+reactivation events exceeds the 95th percentile of a null distribution built
+from N_SHIFTS circular shifts of the neural data (same shift applied to all
+cells simultaneously, preserving inter-cell correlations).
 
-Panel: Participation rate across days (-2 to +2) for LMI+ vs LMI- cells in
-       the significantly-participating subpopulation. Per-mouse averages with
-       individual trajectories. Stats: Kruskal-Wallis test (effect of day)
-       run independently for each of the four groups (R+ positive LMI,
+Panel: Proportion of cells participating across days (-2 to +2) separately
+       for LMI+ vs LMI- cells. Per-mouse averages with individual
+       trajectories. Stats: Kruskal-Wallis test (effect of day) run
+       independently for each of the four groups (R+ positive LMI,
        R+ negative LMI, R- positive LMI, R- negative LMI).
 
 Execution modes:
-    MODE = 'compute' : run full circular-shift pipeline, save CSVs, then plot
-    MODE = 'plot'    : load previously saved CSVs and plot only
+    MODE = 'compute' : run circular-shift pipeline, save CSV, then plot
+    MODE = 'plot'    : load previously saved CSV and plot only
 
 Processed data files are saved/loaded from data_processed/reactivation/.
 Figures and CSVs are saved to io.manuscript_output_dir/supp_4/output/.
@@ -35,6 +36,7 @@ from joblib import Parallel, delayed
 sys.path.append('/home/aprenard/repos/fast-learning')
 import src.utils.utils_io as io
 import src.utils.utils_imaging as utils_imaging
+from src.utils.utils_plot import reward_palette
 
 
 # ============================================================================
@@ -48,50 +50,23 @@ N_JOBS = 35
 
 RESULTS_DIR = os.path.join(io.processed_dir, 'reactivation')
 REACTIVATION_RESULTS_FILE = os.path.join(RESULTS_DIR, 'reactivation_results_p99.pkl')
-LMI_RESULTS_CSV = os.path.join(io.processed_dir, 'lmi_results.csv')
-SUPP4C_RATES_CSV  = os.path.join(RESULTS_DIR, 'supp4c_rates_per_day.csv')
-SUPP4C_SIG_CSV    = os.path.join(RESULTS_DIR, 'supp4c_significant_cells.csv')
-SUPP4C_MERGED_CSV = os.path.join(RESULTS_DIR, 'supp4c_merged.csv')
+BINARY_PARTICIPATION_CSV = os.path.join(RESULTS_DIR, 'binary_participation_with_lmi.csv')
 OUTPUT_DIR = os.path.join(io.manuscript_output_dir, 'supp_4', 'output')
-FOLDER = os.path.join(io.solve_common_paths('processed_data'), 'mice')
 
 # Execution mode
-#   'compute' : run circular-shift control + participation pipeline, save CSVs
-#   'plot'    : load previously saved CSVs and plot only
+#   'compute' : run circular-shift control, save CSV, then plot
+#   'plot'    : load previously saved CSV and plot only
 MODE = 'compute'
 
 # Circular shift parameters
 SAMPLING_RATE = 30
 N_SHIFTS = 1000
-MIN_SHIFT_FRAMES = 300        # 10 s at 30 Hz -- minimum decorrelation gap
+MIN_SHIFT_FRAMES = 0
 SIGNIFICANCE_PCTILE = 95      # top 5 % -> p < 0.05
 EVENT_WINDOW_MS = 150
 EVENT_WINDOW_FRAMES = int(EVENT_WINDOW_MS / 1000 * SAMPLING_RATE)
 PARTICIPATION_THRESHOLD = 0.10
-THRESHOLD_DFF = None
 MIN_EVENTS_FOR_RELIABILITY = 5
-
-
-# ============================================================================
-# Mouse loading
-# ============================================================================
-
-_, _, _all_mice, _db = io.select_sessions_from_db(
-    io.db_path, io.nwb_dir, two_p_imaging='yes'
-)
-
-r_plus_mice, r_minus_mice = [], []
-for _mouse in _all_mice:
-    try:
-        _rg = io.get_mouse_reward_group_from_db(io.db_path, _mouse, db=_db)
-        if _rg == 'R+':
-            r_plus_mice.append(_mouse)
-        elif _rg == 'R-':
-            r_minus_mice.append(_mouse)
-    except:
-        continue
-
-print(f"Found {len(r_plus_mice)} R+ mice and {len(r_minus_mice)} R- mice")
 
 
 # ============================================================================
@@ -106,151 +81,6 @@ def _significance_stars(p):
     elif p < 0.05:
         return '*'
     return 'n.s.'
-
-
-# ============================================================================
-# Participation computation
-# ============================================================================
-
-def _extract_event_responses(mouse, day, preloaded_events):
-    """
-    Extract per-cell dF/F responses around pre-computed reactivation events.
-
-    Uses no-stim trials only. Responses are averaged over ±EVENT_WINDOW_FRAMES
-    around each event. Cells are flagged as participating if their mean response
-    exceeds PARTICIPATION_THRESHOLD.
-
-    Returns DataFrame (mouse_id, day, roi, event_idx, avg_response, participates)
-    or None if insufficient data (<10 no-stim trials or no valid events).
-    """
-    xarr = utils_imaging.load_mouse_xarray(
-        mouse, FOLDER, 'tensor_xarray_learning_data.nc', substracted=True
-    )
-    xarr_day = xarr.sel(trial=xarr['day'] == day)
-    nostim = xarr_day.sel(trial=xarr_day['no_stim'] == 1)
-
-    if len(nostim.trial) < 10:
-        return None
-
-    n_cells, n_trials, n_timepoints = nostim.shape
-    data_3d = nostim.values
-    roi_list = nostim['roi'].values
-    win = EVENT_WINDOW_FRAMES
-
-    rows = []
-    for event_idx in preloaded_events:
-        trial_idx = event_idx // n_timepoints
-        time_idx  = event_idx % n_timepoints
-        if time_idx < win or time_idx >= n_timepoints - win or trial_idx >= n_trials:
-            continue
-        window_data  = data_3d[:, trial_idx, time_idx - win:time_idx + win + 1]
-        avg_response = np.mean(window_data, axis=1)
-        participates = avg_response >= PARTICIPATION_THRESHOLD
-        for icell in range(n_cells):
-            rows.append({
-                'mouse_id': mouse, 'day': day, 'roi': roi_list[icell],
-                'event_idx': event_idx, 'avg_response': float(avg_response[icell]),
-                'participates': bool(participates[icell]),
-            })
-
-    return pd.DataFrame(rows) if rows else None
-
-
-def _compute_participation_rate(responses_df):
-    """Aggregate cell-event responses to per-cell participation rates."""
-    grouped = responses_df.groupby(['mouse_id', 'day', 'roi']).agg(
-        n_participations=('participates', 'sum'),
-        n_events=('participates', 'count'),
-    ).reset_index()
-    grouped['participation_rate'] = grouped['n_participations'] / grouped['n_events']
-    grouped['reliable'] = grouped['n_events'] >= MIN_EVENTS_FOR_RELIABILITY
-    return grouped
-
-
-def _process_mouse_participation(mouse, preloaded_results):
-    """Compute participation rates across all days for one mouse."""
-    all_responses = []
-    for day in DAYS:
-        events = preloaded_results.get('days', {}).get(day, {}).get('events', None)
-        if events is None or len(events) == 0:
-            continue
-        try:
-            resp_df = _extract_event_responses(mouse, day, events)
-            if resp_df is not None and len(resp_df) > 0:
-                all_responses.append(resp_df)
-        except Exception as e:
-            print(f"  Warning: {mouse} day {day}: {e}")
-    if not all_responses:
-        return mouse, None
-    all_resp_df = pd.concat(all_responses, ignore_index=True)
-    return mouse, _compute_participation_rate(all_resp_df)
-
-
-# ============================================================================
-# Aggregation and LMI merging
-# ============================================================================
-
-def _aggregate_across_days(participation_df_all):
-    """Aggregate per-day participation rates to baseline/learning/post periods."""
-    if participation_df_all is None or len(participation_df_all) == 0:
-        return None
-
-    baseline_days = [-2, -1]
-    post_days = [1, 2]
-    results = []
-
-    for (mouse_id, roi), group in participation_df_all.groupby(['mouse_id', 'roi']):
-        baseline_data = group[group['day'].isin(baseline_days)]
-        baseline_rate = baseline_data['participation_rate'].mean() if len(baseline_data) > 0 else np.nan
-        reliable_baseline = baseline_data['reliable'].all() if len(baseline_data) > 0 else False
-
-        learning_data = group[group['day'] == 0]
-        learning_rate = learning_data['participation_rate'].iloc[0] if len(learning_data) > 0 else np.nan
-        reliable_learning = learning_data['reliable'].iloc[0] if len(learning_data) > 0 else False
-
-        post_data = group[group['day'].isin(post_days)]
-        post_rate = post_data['participation_rate'].mean() if len(post_data) > 0 else np.nan
-        reliable_post = post_data['reliable'].all() if len(post_data) > 0 else False
-
-        results.append({
-            'mouse_id': mouse_id, 'roi': roi,
-            'baseline_rate': baseline_rate,
-            'learning_rate': learning_rate,
-            'post_rate': post_rate,
-            'delta_learning': learning_rate - baseline_rate if not np.isnan(baseline_rate) else np.nan,
-            'delta_post': post_rate - baseline_rate if not np.isnan(baseline_rate) else np.nan,
-            'reliable_baseline': reliable_baseline,
-            'reliable_learning': reliable_learning,
-            'reliable_post': reliable_post,
-        })
-
-    return pd.DataFrame(results)
-
-
-def _load_and_match_lmi_data(participation_df):
-    """Load LMI data and merge with participation data."""
-    lmi_df = pd.read_csv(LMI_RESULTS_CSV)
-
-    if 'reward_group' not in lmi_df.columns:
-        group_map = {m: 'R+' for m in r_plus_mice}
-        group_map.update({m: 'R-' for m in r_minus_mice})
-        lmi_df['reward_group'] = lmi_df['mouse_id'].map(group_map)
-
-    lmi_df['lmi_category'] = 'neutral'
-    lmi_df.loc[lmi_df['lmi_p'] >= LMI_POSITIVE_THRESHOLD, 'lmi_category'] = 'positive'
-    lmi_df.loc[lmi_df['lmi_p'] <= LMI_NEGATIVE_THRESHOLD, 'lmi_category'] = 'negative'
-
-    cols = ['mouse_id', 'roi', 'lmi', 'lmi_p', 'lmi_category', 'reward_group']
-    if 'cell_type' in lmi_df.columns:
-        cols.append('cell_type')
-
-    merged_df = pd.merge(participation_df, lmi_df[cols], on=['mouse_id', 'roi'], how='inner')
-
-    print(f"\n  Merged: {len(merged_df)} cells total "
-          f"({(merged_df['lmi_category']=='positive').sum()} LMI+, "
-          f"{(merged_df['lmi_category']=='negative').sum()} LMI-, "
-          f"{(merged_df['lmi_category']=='neutral').sum()} neutral)")
-    return merged_df
 
 
 # ============================================================================
@@ -291,16 +121,17 @@ def _participation_from_3d(data_3d, events, n_timepoints, n_trials):
 
 
 def _compute_participation_with_shifts(mouse, day, n_shifts, preloaded_events):
-    """Compute real participation rates and circular-shift null distribution
+    """Compute binary participation (True/False) via circular-shift control
     for one mouse x day.
 
     Returns a DataFrame with columns
-        mouse_id, day, roi, participation_rate, threshold_95, n_events, significant
+        mouse_id, day, roi, participating (bool), n_events
     or None on failure.
     """
     try:
+        folder = os.path.join(io.solve_common_paths('processed_data'), 'mice')
         xr = utils_imaging.load_mouse_xarray(
-            mouse, FOLDER, 'tensor_xarray_learning_data.nc', substracted=False)
+            mouse, folder, 'tensor_xarray_learning_data.nc', substracted=False)
         xr_day = xr.sel(trial=xr['day'] == day)
         nostim  = xr_day.sel(trial=xr_day['no_stim'] == 1)
 
@@ -323,7 +154,9 @@ def _compute_participation_with_shifts(mouse, day, n_shifts, preloaded_events):
         data_flat  = data_3d.reshape(n_cells, n_frames)
         null_rates = np.full((n_shifts, n_cells), np.nan)
         for i_shift in range(n_shifts):
-            shift      = np.random.randint(MIN_SHIFT_FRAMES, n_frames)
+            shift = (np.random.randint(MIN_SHIFT_FRAMES + 1, n_frames)
+                     if MIN_SHIFT_FRAMES > 0
+                     else np.random.randint(1, n_frames))
             shifted_3d = np.roll(data_flat, shift, axis=1).reshape(
                 n_cells, n_trials, n_timepoints)
             null_r, _ = _participation_from_3d(
@@ -336,10 +169,8 @@ def _compute_participation_with_shifts(mouse, day, n_shifts, preloaded_events):
 
         records = [
             {'mouse_id': mouse, 'day': day, 'roi': roi_list[icell],
-             'participation_rate': real_rates[icell],
-             'threshold_95': threshold_95[icell],
-             'n_events': n_valid,
-             'significant': bool(significant[icell])}
+             'participating': bool(significant[icell]),
+             'n_events': n_valid}
             for icell in range(n_cells)
             if not np.isnan(real_rates[icell])
         ]
@@ -364,12 +195,38 @@ def _process_mouse_circular_shift(mouse, n_shifts, preloaded_results):
     return mouse, pd.concat(dfs, ignore_index=True) if dfs else None
 
 
-def _compute_circular_shift_significance(all_results):
-    """Run circular-shift control and return set of significant (mouse, roi) pairs.
+# ============================================================================
+# Data loading / computation
+# ============================================================================
 
-    Saves SUPP4C_SIG_CSV to RESULTS_DIR.
+def _compute_binary_participation():
+    """Run circular-shift control for all mice x days and merge with LMI data.
+
+    For each cell x day, determines whether the cell participates in
+    reactivation (True/False).
+
+    Saves BINARY_PARTICIPATION_CSV.
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        mouse_id, day, roi, participating (bool), n_events,
+        reward_group, lmi, lmi_p, lmi_category
     """
+    if not os.path.exists(REACTIVATION_RESULTS_FILE):
+        raise FileNotFoundError(
+            f"Reactivation results not found: {REACTIVATION_RESULTS_FILE}\n"
+            "Run reactivation_preprocessing.py first.")
+
+    with open(REACTIVATION_RESULTS_FILE, 'rb') as f:
+        data = pickle.load(f)
+    r_plus_results  = data['r_plus_results']
+    r_minus_results = data['r_minus_results']
+    all_results = {**r_plus_results, **r_minus_results}
+    reward_group_map = {m: 'R+' for m in r_plus_results}
+    reward_group_map.update({m: 'R-' for m in r_minus_results})
     all_mice = list(all_results.keys())
+
     print(f"\nRunning circular-shift control for {len(all_mice)} mice "
           f"({N_SHIFTS} shifts x {len(DAYS)} days each) ...")
     raw = Parallel(n_jobs=N_JOBS, verbose=5)(
@@ -380,128 +237,52 @@ def _compute_circular_shift_significance(all_results):
 
     dfs = [df for _, df in raw if df is not None]
     if not dfs:
-        raise RuntimeError("Circular shift control returned no data.")
+        raise RuntimeError("Circular shift returned no data.")
     participation_df = pd.concat(dfs, ignore_index=True)
+    participation_df['reward_group'] = participation_df['mouse_id'].map(reward_group_map)
 
-    day0_df   = participation_df[participation_df['day'] == 0].copy()
-    sig_cells = day0_df[day0_df['significant']][['mouse_id', 'roi']].drop_duplicates()
+    lmi_df = pd.read_csv(os.path.join(io.processed_dir, 'lmi_results.csv'))
+    lmi_df['lmi_category'] = 'neutral'
+    lmi_df.loc[lmi_df['lmi_p'] >= LMI_POSITIVE_THRESHOLD, 'lmi_category'] = 'positive'
+    lmi_df.loc[lmi_df['lmi_p'] <= LMI_NEGATIVE_THRESHOLD, 'lmi_category'] = 'negative'
 
-    n_sig = len(sig_cells)
-    n_tot = len(day0_df)
-    print(f"Day-0 significant cells: {n_sig}/{n_tot} ({100*n_sig/n_tot:.1f}%)")
-
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    sig_cells.to_csv(SUPP4C_SIG_CSV, index=False)
-    print(f"Saved: {SUPP4C_SIG_CSV}")
-
-    return set(zip(sig_cells['mouse_id'], sig_cells['roi']))
-
-
-# ============================================================================
-# Data loading / computation
-# ============================================================================
-
-def _compute_supp4c_data():
-    """Run full pipeline: participation rates + circular-shift significance filter.
-
-    1. Load reactivation events.
-    2. Compute per-cell participation rates per day.
-    3. Aggregate and merge with LMI data.
-    4. Run circular-shift control and restrict to day-0 significant cells.
-
-    Saves SUPP4C_RATES_CSV, SUPP4C_SIG_CSV, SUPP4C_MERGED_CSV.
-
-    Returns
-    -------
-    merged_df  : pd.DataFrame  -- sig-cell aggregated data with LMI info
-    per_day_df : pd.DataFrame  -- sig-cell per-day participation rates
-    """
-    if not os.path.exists(REACTIVATION_RESULTS_FILE):
-        raise FileNotFoundError(
-            f"Reactivation results not found: {REACTIVATION_RESULTS_FILE}")
-
-    with open(REACTIVATION_RESULTS_FILE, 'rb') as f:
-        data = pickle.load(f)
-    r_plus_results  = data['r_plus_results']
-    r_minus_results = data['r_minus_results']
-    all_results = {**r_plus_results, **r_minus_results}
-    all_mice = list(all_results.keys())
-
-    # Participation rates
-    print(f"\nComputing participation rates for {len(all_mice)} mice...")
-    results_list = Parallel(n_jobs=N_JOBS, verbose=10)(
-        delayed(_process_mouse_participation)(
-            mouse, all_results.get(mouse, {}),
-        )
-        for mouse in all_mice
+    merged = pd.merge(
+        participation_df,
+        lmi_df[['mouse_id', 'roi', 'lmi', 'lmi_p', 'lmi_category']],
+        on=['mouse_id', 'roi'], how='inner',
     )
-    all_data = [df for _, df in results_list if df is not None]
-    if not all_data:
-        raise RuntimeError("No participation data computed.")
-    per_day_df = pd.concat(all_data, ignore_index=True)
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    per_day_df.to_csv(SUPP4C_RATES_CSV, index=False)
+    merged.to_csv(BINARY_PARTICIPATION_CSV, index=False)
+    print(f"Saved: {BINARY_PARTICIPATION_CSV}")
 
-    aggregated_df = _aggregate_across_days(per_day_df)
-    merged_df = _load_and_match_lmi_data(aggregated_df)
-
-    # Circular shift significance filter
-    sig_keys = _compute_circular_shift_significance(all_results)
-    mask_merged = [(m, r) in sig_keys
-                   for m, r in zip(merged_df['mouse_id'], merged_df['roi'])]
-    mask_perday = [(m, r) in sig_keys
-                   for m, r in zip(per_day_df['mouse_id'], per_day_df['roi'])]
-    merged_df  = merged_df[mask_merged].reset_index(drop=True)
-    per_day_df = per_day_df[mask_perday].reset_index(drop=True)
-
-    # Add lmi_category
-    merged_df['lmi_category'] = 'neutral'
-    merged_df.loc[merged_df['lmi_p'] >= LMI_POSITIVE_THRESHOLD,
-                  'lmi_category'] = 'positive'
-    merged_df.loc[merged_df['lmi_p'] <= LMI_NEGATIVE_THRESHOLD,
-                  'lmi_category'] = 'negative'
-
-    merged_df.to_csv(SUPP4C_MERGED_CSV, index=False)
-    print(f"Saved: {SUPP4C_MERGED_CSV}")
-
-    return merged_df, per_day_df
+    return merged
 
 
-def _load_supp4c_data():
-    """Load pre-computed supp_4c data from CSVs."""
-    for path in [SUPP4C_RATES_CSV, SUPP4C_MERGED_CSV]:
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"Pre-computed data not found: {path}\n"
-                "Run with MODE='compute' first.")
-    merged_df  = pd.read_csv(SUPP4C_MERGED_CSV)
-    per_day_df = pd.read_csv(SUPP4C_RATES_CSV)
-
-    # Filter per_day_df to sig cells recorded in merged_df
-    sig_keys = set(zip(merged_df['mouse_id'], merged_df['roi']))
-    mask = [(m, r) in sig_keys
-            for m, r in zip(per_day_df['mouse_id'], per_day_df['roi'])]
-    per_day_df = per_day_df[mask].reset_index(drop=True)
-
-    print(f"Loaded {len(merged_df)} sig cells, {len(per_day_df)} cell-day records.")
-    return merged_df, per_day_df
+def _load_binary_participation():
+    """Load pre-computed binary participation data from CSV."""
+    if not os.path.exists(BINARY_PARTICIPATION_CSV):
+        raise FileNotFoundError(
+            f"Pre-computed data not found: {BINARY_PARTICIPATION_CSV}\n"
+            "Run with MODE='compute' first.")
+    df = pd.read_csv(BINARY_PARTICIPATION_CSV)
+    print(f"Loaded: {BINARY_PARTICIPATION_CSV}  ({len(df)} rows)")
+    return df
 
 
 # ============================================================================
-# Panel: participation rate across days (LMI+ vs LMI-, sig cells only)
+# Panel: proportion of participating cells across days (LMI+ vs LMI-)
 # ============================================================================
 
-def panel_supp4c_participation_across_days(
-    merged_df,
-    per_day_df,
+def panel_supp4d_proportion_across_days(
+    df,
     output_dir=OUTPUT_DIR,
-    filename='supp_4c',
+    filename='supp_4d',
     save_format='svg',
     dpi=300,
 ):
-    """Supp Figure 4c: participation rate across days for significantly-
-    participating LMI+ vs LMI- cells.
+    """Supp Figure 4d: proportion of cells participating across days for
+    LMI+ vs LMI- cells (binary participation).
 
     Per-mouse averages with individual trajectories. Stats: Kruskal-Wallis
     test (effect of day) run independently for each of the four groups
@@ -509,7 +290,7 @@ def panel_supp4c_participation_across_days(
 
     Saves:
         <filename>.svg         -- figure
-        <filename>_data.csv    -- per-mouse x day x LMI-category averages
+        <filename>_data.csv    -- per-mouse x day x LMI-category proportions
         <filename>_stats.csv   -- Kruskal-Wallis results per group
     """
     sns.set_theme(context='paper', style='ticks', palette='deep',
@@ -520,37 +301,35 @@ def panel_supp4c_participation_across_days(
     cat_colors = {'positive': '#d62728', 'negative': '#1f77b4'}
     reward_groups = ['R+', 'R-']
 
-    lmi_cells = merged_df.loc[
-        merged_df['lmi_category'].isin(lmi_categories),
-        ['mouse_id', 'roi', 'lmi_category', 'reward_group'],
-    ]
-    day_data = pd.merge(per_day_df, lmi_cells, on=['mouse_id', 'roi'], how='inner')
+    lmi_df = df[df['lmi_category'].isin(lmi_categories)].copy()
 
-    mouse_day_avg = (
-        day_data
+    mouse_day_prop = (
+        lmi_df
         .groupby(['mouse_id', 'reward_group', 'lmi_category', 'day'],
-                 observed=True)['participation_rate']
+                 observed=True)['participating']
         .mean()
         .reset_index()
+        .rename(columns={'participating': 'proportion'})
     )
 
-    cell_counts = (
-        lmi_cells.groupby(['reward_group', 'lmi_category'], observed=True)
-        .size()
-        .to_dict()
-    )
+    cell_counts = {
+        (rg, cat): lmi_df[
+            (lmi_df['reward_group'] == rg) & (lmi_df['lmi_category'] == cat)
+        ][['mouse_id', 'roi']].drop_duplicates().shape[0]
+        for rg in reward_groups for cat in lmi_categories
+    }
 
     # Kruskal-Wallis: effect of day within each (reward_group, lmi_category) group
     all_stats_rows = []
     kw_results = {}
     for rg in reward_groups:
         for cat in lmi_categories:
-            grp_data = mouse_day_avg[
-                (mouse_day_avg['reward_group'] == rg) &
-                (mouse_day_avg['lmi_category'] == cat)
+            grp_data = mouse_day_prop[
+                (mouse_day_prop['reward_group'] == rg) &
+                (mouse_day_prop['lmi_category'] == cat)
             ]
             day_groups = [
-                grp_data[grp_data['day'] == day]['participation_rate'].values
+                grp_data[grp_data['day'] == day]['proportion'].values
                 for day in days_sorted
             ]
             day_groups = [g for g in day_groups if len(g) > 0]
@@ -579,10 +358,10 @@ def panel_supp4c_participation_across_days(
 
     for i, rg in enumerate(reward_groups):
         ax = axes[i]
-        grp = mouse_day_avg[mouse_day_avg['reward_group'] == rg]
+        grp = mouse_day_prop[mouse_day_prop['reward_group'] == rg]
 
         sns.barplot(
-            data=grp, x='day', y='participation_rate', hue='lmi_category',
+            data=grp, x='day', y='proportion', hue='lmi_category',
             hue_order=lmi_categories, palette=cat_colors, order=days_sorted,
             estimator=np.mean, errorbar=('ci', 95), capsize=0,
             err_kws={'linewidth': 1.5}, alpha=0.7, ax=ax,
@@ -604,7 +383,7 @@ def panel_supp4c_participation_across_days(
             for mouse_id in cat_grp['mouse_id'].unique():
                 mdata = cat_grp[cat_grp['mouse_id'] == mouse_id].sort_values('day')
                 mx = [x_centers[d] for d in mdata['day'] if d in x_centers]
-                my = mdata['participation_rate'].values
+                my = mdata['proportion'].values
                 ax.plot(mx, my, '-', color=cat_colors[cat],
                         linewidth=0.8, alpha=0.4, zorder=5)
 
@@ -622,7 +401,9 @@ def panel_supp4c_participation_across_days(
         ax.set_title(f'{rg}  (LMI+: {n_pos} cells | LMI-: {n_neg} cells)',
                      fontsize=9, fontweight='bold')
         ax.set_xlabel('Day', fontsize=9)
-        ax.set_ylabel('Participation rate (sig. cells)' if i == 0 else '', fontsize=9)
+        ax.set_ylabel('Proportion of cells participating' if i == 0 else '',
+                      fontsize=9)
+        ax.set_ylim(0, None)
         ax.tick_params(labelsize=8)
         handles, labels = ax.get_legend_handles_labels()
         ax.legend(handles, [f'{l.capitalize()} LMI' for l in labels], fontsize=8)
@@ -653,14 +434,14 @@ if __name__ == '__main__':
     print(f"Output directory: {OUTPUT_DIR}")
 
     if MODE == 'compute':
-        merged_df, per_day_df = _compute_supp4c_data()
+        df = _compute_binary_participation()
     elif MODE == 'plot':
-        merged_df, per_day_df = _load_supp4c_data()
+        df = _load_binary_participation()
     else:
         raise ValueError(f"Unknown MODE '{MODE}'. Use 'compute' or 'plot'.")
 
-    print(f"\nDataset: {len(merged_df)} sig cells, "
-          f"{len(per_day_df)} cell-day records, "
-          f"{merged_df['mouse_id'].nunique()} mice")
+    print(f"\nDataset: {len(df)} cell-day records, "
+          f"{df['mouse_id'].nunique()} mice, "
+          f"{df[['mouse_id', 'roi']].drop_duplicates().shape[0]} unique cells")
 
-    panel_supp4c_participation_across_days(merged_df, per_day_df, filename='supp_4c')
+    panel_supp4d_proportion_across_days(df, filename='supp_4d')

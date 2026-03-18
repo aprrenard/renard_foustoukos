@@ -12,6 +12,7 @@ For each panel, two CSV files are saved alongside this script:
 """
 
 import os
+import pickle
 import sys
 
 import numpy as np
@@ -43,6 +44,7 @@ DAYS = [-2, -1, 0, 1, 2]
 N_MAP_TRIALS = 40
 
 OUTPUT_DIR = os.path.join(io.manuscript_output_dir, 'figure_3', 'output')
+RESULTS_DIR = os.path.join(io.processed_dir, 'decoding')
 
 
 # ============================================================================
@@ -188,6 +190,75 @@ def _significance_stars(p):
     elif p < 0.05:
         return '*'
     return 'n.s.'
+
+
+# ============================================================================
+# Decoder weight saving (used by figure_4b and figure_4c)
+# ============================================================================
+
+def train_and_save_decoder_weights(
+    vectors_rew, vectors_nonrew, mice_rew, mice_nonrew,
+    pre_days=[-2, -1], post_days=[1, 2],
+    seed=42,
+    results_dir=RESULTS_DIR,
+):
+    """
+    Train a fixed pre/post logistic regression decoder per mouse on mapping
+    trials (Days -2/-1 vs +1/+2) and save the weights to results_dir.
+
+    Saved file: decoder_weights.pkl
+    Structure: {mouse_id: {'scaler': StandardScaler, 'clf': LogisticRegression,
+                            'sign_flip': int, 'reward_group': str}}
+
+    The sign_flip ensures that higher decision values always correspond to
+    post-learning activity.
+    """
+    weights = {}
+
+    for vectors, mice_list, reward_group in [
+        (vectors_rew, mice_rew, 'R+'),
+        (vectors_nonrew, mice_nonrew, 'R-'),
+    ]:
+        for d, mouse in zip(vectors, mice_list):
+            day_per_trial = d['day'].values
+            train_mask = np.isin(day_per_trial, pre_days + post_days)
+            if np.sum(train_mask) < 4:
+                print(f'  {mouse}: not enough training trials, skipping.')
+                continue
+
+            X_train = d.values[:, train_mask].T
+            y_train = np.array([0 if day in pre_days else 1
+                                 for day in day_per_trial[train_mask]])
+
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            clf = LogisticRegression(max_iter=5000, random_state=seed)
+            clf.fit(X_train_scaled, y_train)
+
+            # Ensure post > pre in decision value
+            pre_mask = np.isin(day_per_trial, pre_days)
+            post_mask = np.isin(day_per_trial, post_days)
+            mean_dec_pre = np.mean(clf.decision_function(
+                scaler.transform(d.values[:, pre_mask].T)))
+            mean_dec_post = np.mean(clf.decision_function(
+                scaler.transform(d.values[:, post_mask].T)))
+            sign_flip = -1 if mean_dec_pre > mean_dec_post else 1
+
+            weights[mouse] = {
+                'scaler': scaler,
+                'clf': clf,
+                'sign_flip': sign_flip,
+                'reward_group': reward_group,
+            }
+            print(f'  {mouse} ({reward_group}): decoder trained '
+                  f'({X_train.shape[1]} cells, sign_flip={sign_flip})')
+
+    os.makedirs(results_dir, exist_ok=True)
+    out_path = os.path.join(results_dir, 'decoder_weights.pkl')
+    with open(out_path, 'wb') as f:
+        pickle.dump(weights, f)
+    print(f'Decoder weights saved: {out_path}  ({len(weights)} mice)')
+    return weights
 
 
 # ============================================================================
@@ -680,6 +751,9 @@ if __name__ == '__main__':
         select_lmi=SELECT_LMI,
         projection_type=PROJECTION_TYPE,
     )
+
+    print("\nTraining and saving decoder weights (used by figure_4b/c)...")
+    train_and_save_decoder_weights(vectors_rew, vectors_nonrew, mice_rew, mice_nonrew)
 
     print("\nGenerating panel m (decoding accuracy)...")
     panel_m_decoding_accuracy(**shared, n_shuffles=N_SHUFFLES)
