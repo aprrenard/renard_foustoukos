@@ -19,7 +19,7 @@ import xarray as xr
 sys.path.append(r'/home/aprenard/repos/NWB_analysis')
 sys.path.append(r'/home/aprenard/repos/fast-learning')
 # from nwb_wrappers import nwb_reader_functions as nwb_read
-import src.utils.utils_imaging as imaging_utils 
+import src.utils.utils_imaging as utils_imaging 
 import src.utils.utils_io as io
 from src.utils.utils_plot import *
 from scipy.stats import ks_2samp
@@ -67,6 +67,21 @@ cell_count = cell_count.loc[cell_count.cell_type.isin(['all_cells', 'wS2', 'wM1'
 prop_ct = cell_count.loc[cell_count.cell_type.isin(['wS2', 'wM1'])]
 prop_ct = prop_ct.merge(cell_count.loc[cell_count.cell_type == 'all_cells', ['mouse_id', 'reward_group', 'roi']], on=['mouse_id', 'reward_group'], suffixes=('', '_total'))
 prop_ct['prop'] = prop_ct['roi'] / prop_ct['roi_total']
+
+# Count mice with projection labels.
+mouse_proj = dataset.groupby(['mouse_id', 'reward_group'])['cell_type'].unique().reset_index()
+mouse_proj['has_wS2'] = mouse_proj['cell_type'].apply(lambda ct: 'wS2' in ct)
+mouse_proj['has_wM1'] = mouse_proj['cell_type'].apply(lambda ct: 'wM1' in ct)
+missing_proj = mouse_proj.loc[~mouse_proj['has_wS2'] & ~mouse_proj['has_wM1'], ['mouse_id', 'reward_group']]
+
+print('mice with wS2 cells by reward group:')
+print(mouse_proj.groupby('reward_group')['has_wS2'].sum().reset_index())
+print('mice with wM1 cells by reward group:')
+print(mouse_proj.groupby('reward_group')['has_wM1'].sum().reset_index())
+print(f"mice with no wS2/wM1 projection labels: {len(missing_proj)}")
+if not missing_proj.empty:
+    print('mice missing projection labels:')
+    print(missing_proj.to_string(index=False))
 
 # Save figures to PDF.
 save_dir = '/mnt/lsens-analysis/Anthony_Renard/analysis_output/counts'

@@ -1014,6 +1014,62 @@ plt.savefig(output_file, format='svg', dpi=300)
 
 df_interp.to_csv(os.path.join(output_dir, 'performance_D0_all_stim_time_axis_data.csv'), index=False)
 
+
+# ############################################################
+# Time of 22nd whisker trial during day 0 across mice.
+# The 22nd whisker trial is the first trial at which R+ and R-
+# diverge significantly in whisker performance.
+# ############################################################
+
+WHISKER_TRIAL_OF_INTEREST = 22
+
+table_file = io.adjust_path_to_host(r'/mnt/lsens-analysis/Anthony_Renard/data_processed/behavior/behavior_imagingmice_table_5days_cut_with_learning_curves.csv')
+table = pd.read_csv(table_file)
+
+df_day0_whisker = table.loc[(table.day == 0) & (table.whisker_stim == 1)].copy()
+df_day0_whisker = df_day0_whisker.sort_values(['mouse_id', 'stim_onset'])
+
+# For each mouse, find the stim_onset of the Nth whisker trial (1-indexed).
+records = []
+for mouse, mouse_data in df_day0_whisker.groupby('mouse_id'):
+    mouse_data = mouse_data.reset_index(drop=True)
+    if len(mouse_data) >= WHISKER_TRIAL_OF_INTEREST:
+        trial_row = mouse_data.iloc[WHISKER_TRIAL_OF_INTEREST - 1]
+        records.append({
+            'mouse_id': mouse,
+            'reward_group': trial_row['reward_group'],
+            'stim_onset_s': trial_row['stim_onset'],
+            'stim_onset_min': trial_row['stim_onset'] / 60,
+        })
+
+df_t22 = pd.DataFrame(records)
+
+# Average across all mice.
+mean_min = df_t22['stim_onset_min'].mean()
+std_min = df_t22['stim_onset_min'].std()
+n_mice = len(df_t22)
+print(f"\nTime of whisker trial #{WHISKER_TRIAL_OF_INTEREST} from session start (day 0):")
+print(f"  {mean_min:.2f} ± {std_min:.2f} min  (N={n_mice} mice)")
+
+# Plot: single bar for all mice.
+sns.set_theme(context='paper', style='ticks', palette='deep', font='sans-serif', font_scale=1,
+              rc={'pdf.fonttype': 42, 'ps.fonttype': 42, 'svg.fonttype': 'none'})
+fig, ax = plt.subplots(1, 1, figsize=(2, 4))
+df_t22['all'] = ''
+sns.barplot(data=df_t22, x='all', y='stim_onset_min', color='grey', width=0.4, ax=ax)
+sns.stripplot(data=df_t22, x='all', y='stim_onset_min', color='black', jitter=False, alpha=0.6, ax=ax)
+ax.set_xlabel('')
+ax.set_ylabel(f'Time at whisker trial #{WHISKER_TRIAL_OF_INTEREST} (min)')
+ax.set_title(f'Whisker trial #{WHISKER_TRIAL_OF_INTEREST}\n{mean_min:.1f} ± {std_min:.1f} min')
+sns.despine()
+plt.tight_layout()
+
+# Save.
+output_dir = io.adjust_path_to_host(r'/mnt/lsens-analysis/Anthony_Renard/analysis_output/fast-learning/behavior')
+plt.savefig(os.path.join(output_dir, f'time_whisker_trial_{WHISKER_TRIAL_OF_INTEREST}.svg'), dpi=300)
+df_t22.drop(columns='all').to_csv(os.path.join(output_dir, f'time_whisker_trial_{WHISKER_TRIAL_OF_INTEREST}_data.csv'), index=False)
+
+
 # ############################################################
 # Muscimol inactivation.
 # ############################################################
